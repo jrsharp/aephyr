@@ -1,0 +1,62 @@
+# SPDX-License-Identifier: Apache-2.0
+
+description: Æther Mesh Network Configuration
+
+compatible: "aether-mesh-net"
+
+properties:
+  network-id:
+    type: int
+    description: HeyMac network identifier
+    default: 0x915E
+
+  mesh-network-id:
+    type: int
+    description: Æther mesh network identifier (optional)
+
+  node-id:
+    type: int
+    description: Node identifier for this device
+
+  mesh-enabled:
+    type: boolean
+    description: Enable mesh networking features
+
+  max-hops:
+    type: int
+    description: Maximum hop count for mesh packets
+    default: 6
+
+  hello-interval:
+    type: int
+    description: Hello message interval in seconds
+    default: 30
+
+  route-timeout:
+    type: int
+    description: Route timeout in seconds
+    default: 300
+
+  neighbor-timeout:
+    type: int
+    description: Neighbor timeout in seconds
+    default: 90
+
+  sleep-enabled:
+    type: boolean
+    description: Enable power management features
+
+  beacon-interval:
+    type: int
+    description: Beacon interval in milliseconds (for coordinators)
+    default: 1000
+
+  use-short-addr:
+    type: boolean
+    description: Use 2-byte short addresses instead of 6-byte long addresses
+    default: true
+
+  conditional-net-id:
+    type: boolean
+    description: Enable conditional mesh network ID optimization
+    default: true

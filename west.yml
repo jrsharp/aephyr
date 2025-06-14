@@ -1,0 +1,18 @@
+# SPDX-License-Identifier: MIT-0
+
+manifest:
+  version: "0.0.1"
+  
+  defaults:
+    remote: origin
+    
+  remotes:
+    - name: origin
+      url-base: https://github.com/jrsharp/aephyr
+      
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+      revision: main
+      import: true

@@ -1,0 +1,50 @@
+/*
+ * Copyright (c) 2025 Æther Authors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+    chosen {
+        zephyr,lora = &lora0;
+    };
+    
+    aether_config: aether-mesh-net {
+        compatible = "aether-mesh-net";
+        network-id = <0x915E>;
+        mesh-enabled = <1>;
+        max-hops = <6>;
+        hello-interval = <60>;      /* Longer interval for power saving */
+        route-timeout = <600>;
+        use-short-addr = <1>;       /* Use short addresses by default */
+        conditional-net-id = <1>;   /* Enable optimization */
+    };
+};
+
+&spi0 {
+    status = "okay";
+    cs-gpios = <&gpio0 5 GPIO_ACTIVE_LOW>;
+    
+    lora0: sx1262@0 {
+        compatible = "semtech,sx1262";
+        reg = <0>;
+        spi-max-frequency = <1000000>;
+        
+        /* RP2040 Pico pin assignments */
+        reset-gpios = <&gpio0 6 GPIO_ACTIVE_LOW>;
+        busy-gpios = <&gpio0 7 GPIO_ACTIVE_HIGH>;
+        dio1-gpios = <&gpio0 8 GPIO_ACTIVE_HIGH>;
+        
+        /* Optional power control */
+        power-gpios = <&gpio0 9 GPIO_ACTIVE_HIGH>;
+        
+        status = "okay";
+    };
+};
+
+/* USB CDC ACM is default on Pico */
+&zephyr_udc0 {
+    cdc_acm_uart0: cdc_acm_uart0 {
+        compatible = "zephyr,cdc-acm-uart";
+    };
+};

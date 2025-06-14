@@ -1,0 +1,214 @@
+# SPDX-License-Identifier: Apache-2.0
+
+if NET_L2_CUSTOM
+
+config NET_L2_HEYMAC
+	bool "HeyMac Layer 2 protocol support"
+	depends on NET_L2_CUSTOM
+	depends on LORA
+	help
+	  Enable HeyMac Layer 2 protocol for LoRa mesh networking.
+	  HeyMac provides the MAC layer for Æther mesh networks.
+
+if NET_L2_HEYMAC
+
+config NET_L2_HEYMAC_LOG_LEVEL
+	int "HeyMac log level"
+	depends on LOG
+	default 3
+	range 0 4
+	help
+	  Set log level for HeyMac protocol.
+
+config HEYMAC_DEFAULT_NET_ID
+	hex "Default HeyMac network ID"
+	default 0x915E
+	help
+	  Default network ID for HeyMac frames.
+	  0x915E = "915E" for 915MHz networks.
+
+config HEYMAC_USE_SHORT_ADDR
+	bool "Use short addressing by default"
+	default y
+	help
+	  Use 2-byte short addresses instead of 6-byte long addresses.
+
+config HEYMAC_MAX_FRAME_SIZE
+	int "Maximum frame size"
+	default 255
+	range 64 255
+	help
+	  Maximum HeyMac frame size in bytes.
+
+endif # NET_L2_HEYMAC
+
+config AETHER_MESH
+	bool "Æther mesh networking support"
+	depends on NET_L2_HEYMAC
+	help
+	  Enable Æther mesh networking protocol for multi-hop LoRa networks.
+
+if AETHER_MESH
+
+config AETHER_MESH_LOG_LEVEL
+	int "Æther mesh log level"
+	depends on LOG
+	default 3
+	range 0 4
+	help
+	  Set log level for Æther mesh protocol.
+
+config AETHER_MAX_ROUTES
+	int "Maximum number of routes in routing table"
+	default 16
+	range 4 64
+	help
+	  Maximum number of destination routes to maintain.
+
+config AETHER_MAX_NEIGHBORS
+	int "Maximum number of neighbors"
+	default 8
+	range 4 32
+	help
+	  Maximum number of direct neighbors to track.
+
+config AETHER_DEFAULT_TTL
+	int "Default time-to-live for mesh packets"
+	default 6
+	range 1 15
+	help
+	  Default TTL value for originated packets.
+
+config AETHER_HELLO_INTERVAL
+	int "Hello message interval (seconds)"
+	default 30
+	range 10 300
+	help
+	  Interval between hello messages for neighbor discovery.
+
+config AETHER_ROUTE_TIMEOUT
+	int "Route timeout (seconds)"
+	default 300
+	range 60 3600
+	help
+	  Time before inactive routes are expired.
+
+config AETHER_NEIGHBOR_TIMEOUT
+	int "Neighbor timeout (seconds)"
+	default 90
+	range 30 600
+	help
+	  Time before inactive neighbors are considered lost.
+
+config AETHER_CONDITIONAL_NET_ID
+	bool "Use conditional mesh network ID optimization"
+	default y
+	help
+	  Enable conditional mesh network ID to save 2 bytes when mesh
+	  network ID matches MAC network ID (12.5% header reduction).
+
+config AETHER_MAX_PAYLOAD
+	int "Maximum payload size"
+	default 64
+	range 32 200
+	help
+	  Maximum payload size for mesh packets.
+
+config AETHER_SHELL
+	bool "Æther shell commands"
+	depends on SHELL
+	help
+	  Enable shell commands for Æther mesh debugging and control.
+
+endif # AETHER_MESH
+
+config AETHER_LORA
+	bool "Æther LoRa driver integration"
+	depends on LORA_SX126X
+	depends on NET_L2_HEYMAC
+	help
+	  LoRa driver integration for Æther mesh networking.
+
+if AETHER_LORA
+
+config AETHER_LORA_LOG_LEVEL
+	int "Æther LoRa log level"
+	depends on LOG
+	default 3
+	range 0 4
+
+config AETHER_RX_QUEUE_SIZE
+	int "RX message queue size"
+	default 8
+	range 4 32
+	help
+	  Number of messages that can be queued for RX processing.
+
+config AETHER_TX_QUEUE_SIZE
+	int "TX message queue size"
+	default 4
+	range 2 16
+	help
+	  Number of messages that can be queued for transmission.
+
+config AETHER_RX_STACK_SIZE
+	int "RX thread stack size"
+	default 2048 if !SOC_ESP32
+	default 3072 if SOC_ESP32
+	range 1024 8192
+	help
+	  Stack size for the RX processing thread.
+
+config AETHER_TX_STACK_SIZE
+	int "TX thread stack size"
+	default 1536 if !SOC_ESP32
+	default 2048 if SOC_ESP32
+	range 1024 8192
+	help
+	  Stack size for the TX processing thread.
+
+config AETHER_RX_THREAD_PRIO
+	int "RX thread priority"
+	default 2
+	range 0 16
+	help
+	  Priority for the RX processing thread.
+
+config AETHER_TX_THREAD_PRIO
+	int "TX thread priority"
+	default 3
+	range 0 16
+	help
+	  Priority for the TX processing thread.
+
+config AETHER_LORA_SF
+	int "Default spreading factor"
+	default 7
+	range 7 12
+	help
+	  Default LoRa spreading factor (SF7-SF12).
+
+config AETHER_LORA_BW
+	int "Default bandwidth"
+	default 0
+	range 0 2
+	help
+	  Default LoRa bandwidth (0=125kHz, 1=250kHz, 2=500kHz).
+
+config AETHER_LORA_CR
+	int "Default coding rate"
+	default 1
+	range 1 4
+	help
+	  Default LoRa coding rate (1=4/5, 2=4/6, 3=4/7, 4=4/8).
+
+config AETHER_LORA_TX_POWER
+	int "Default TX power (dBm)"
+	default 14
+	range 0 22
+	help
+	  Default transmit power in dBm.
+
+endif # AETHER_LORA
+
+endif # NET_L2_CUSTOM

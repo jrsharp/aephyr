@@ -6,6 +6,78 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 This is the Æther Stack - a Zephyr RTOS module implementing HeyMac Layer 2 protocol and Æther mesh networking for LoRa networks. The project provides multi-hop mesh networking capabilities optimized for low-power, long-range communication.
 
+## Using as a Library
+
+This module is designed to be consumed by other Zephyr projects (e.g., cyberterminal firmware).
+
+### Integration via ZEPHYR_EXTRA_MODULES
+
+In your project's **CMakeLists.txt** (before `find_package(Zephyr)`):
+```cmake
+list(APPEND ZEPHYR_EXTRA_MODULES /path/to/aephyr)
+find_package(Zephyr REQUIRED HINTS $ENV{ZEPHYR_BASE})
+```
+
+### Required Kconfig Options
+
+Add to your project's **prj.conf**:
+```kconfig
+# Networking stack
+CONFIG_NETWORKING=y
+CONFIG_NET_L2_CUSTOM=y
+
+# HeyMac L2 (MAC layer)
+CONFIG_NET_L2_HEYMAC=y
+
+# Aether mesh networking
+CONFIG_AETHER_MESH=y
+
+# LoRa driver integration
+CONFIG_AETHER_LORA=y
+
+# LoRa hardware (you likely have this already)
+CONFIG_LORA=y
+CONFIG_LORA_SX126X=y
+```
+
+### API Usage
+
+```c
+#include <zephyr/net/aether_mesh.h>
+
+/* Receive callback - called when messages arrive */
+void on_message(struct net_if *iface, const uint8_t src[6],
+                const uint8_t *data, size_t len, void *user_data)
+{
+    printk("From %02x:%02x:%02x:%02x:%02x:%02x: %.*s\n",
+           src[0], src[1], src[2], src[3], src[4], src[5],
+           (int)len, data);
+}
+
+/* Initialization (after network interface is up) */
+struct net_if *iface = net_if_get_default();
+net_if_up(iface);
+aether_mesh_init(iface, 0x915E);  /* 0x915E = 915MHz network */
+aether_mesh_register_recv_callback(iface, on_message, NULL);
+
+/* Send to specific address */
+uint8_t dest[6] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06};
+aether_mesh_send(iface, dest, "Hello", 5, AETHER_PRIORITY_NORMAL);
+
+/* Broadcast to all neighbors */
+uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+aether_mesh_send(iface, bcast, "Hello all", 9, AETHER_PRIORITY_NORMAL);
+
+/* Query mesh status */
+int neighbors = aether_mesh_get_neighbor_count(iface);
+int routes = aether_mesh_get_route_count(iface);
+```
+
+### Key Header Files
+
+- `<zephyr/net/aether_mesh.h>` - Mesh networking API (send, receive, routing)
+- `<zephyr/net/heymac.h>` - Low-level MAC layer (address management, network ID)
+
 ## Build Commands
 
 ### Module Development

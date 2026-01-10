@@ -1,5 +1,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
+config NET_L2_CUSTOM
+	bool "Enable custom Layer 2 protocol support"
+	depends on NETWORKING
+	help
+	  Enable support for custom Layer 2 protocols.
+	  This allows implementing custom MAC protocols that don't fit
+	  the standard Ethernet/IEEE 802.11/etc. model.
+
 if NET_L2_CUSTOM
 
 config NET_L2_HEYMAC

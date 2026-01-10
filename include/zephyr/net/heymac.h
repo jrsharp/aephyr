@@ -40,6 +40,19 @@ extern "C" {
 #define HEYMAC_ADDR_SHORT_LEN  2
 #define HEYMAC_ADDR_LONG_LEN   6
 
+/* Default configuration values */
+#ifndef CONFIG_HEYMAC_DEFAULT_NET_ID
+#define CONFIG_HEYMAC_DEFAULT_NET_ID    0x915E
+#endif
+
+#ifndef CONFIG_HEYMAC_BEACON_INTERVAL_MS
+#define CONFIG_HEYMAC_BEACON_INTERVAL_MS    1000
+#endif
+
+#ifndef CONFIG_HEYMAC_USE_SHORT_ADDR
+#define CONFIG_HEYMAC_USE_SHORT_ADDR    0
+#endif
+
 /* HeyMac address structure */
 struct heymac_addr {
 	uint8_t type;     /* 0=short, 1=long */
@@ -73,20 +86,46 @@ struct heymac_radio_api {
 	int (*tx)(const struct device *dev, struct net_pkt *pkt);
 };
 
+/* HeyMac states for HSM */
+enum heymac_state {
+    HEYMAC_STATE_INITIAL,
+    HEYMAC_STATE_INITIALIZING,
+    HEYMAC_STATE_LURKING,
+    HEYMAC_STATE_BEACONING,
+    HEYMAC_STATE_LINKING,
+};
+
+/* HeyMac events */
+enum heymac_event {
+    HEYMAC_EVENT_INIT,
+    HEYMAC_EVENT_INIT_COMPLETE,
+    HEYMAC_EVENT_BEACON_TIMEOUT,
+    HEYMAC_EVENT_FRAME_RECEIVED,
+    HEYMAC_EVENT_NEIGHBOR_FOUND,
+    HEYMAC_EVENT_NEIGHBOR_LOST,
+    HEYMAC_EVENT_LINK_TIMEOUT,
+};
+
 /* HeyMac context for network interface */
 struct heymac_context {
 	struct net_if *iface;
-	const struct device *radio_dev;
+	enum heymac_state state;
+	struct k_mutex tx_lock;
+	struct k_mutex state_mutex;
+	struct k_work_delayable beacon_work;
+	struct k_work_delayable timeout_work;
+	
 	uint16_t net_id;
 	struct heymac_addr local_addr;
 	uint8_t tx_seq_no;
-	struct k_mutex tx_lock;
 	
 	/* Statistics */
-	uint32_t tx_packets;
 	uint32_t rx_packets;
-	uint32_t tx_errors;
+	uint32_t tx_packets;
+	uint32_t rx_beacons;
+	uint32_t tx_beacons;
 	uint32_t rx_errors;
+	uint32_t tx_errors;
 };
 
 /* HeyMac API functions */
@@ -164,6 +203,52 @@ int heymac_build_header(const struct heymac_hdr *hdr,
  */
 void heymac_recv(struct net_if *iface, struct net_pkt *pkt);
 
+/**
+ * @brief State machine execution
+ *
+ * @param ctx HeyMac context
+ * @param event Event to process
+ */
+void heymac_state_machine_run(struct heymac_context *ctx, enum heymac_event event);
+
+/**
+ * @brief Send beacon frame
+ *
+ * @param ctx HeyMac context
+ * @return 0 on success, negative error code otherwise
+ */
+int heymac_send_beacon(struct heymac_context *ctx);
+
+/**
+ * @brief Schedule timeout work
+ *
+ * @param ctx HeyMac context
+ * @param timeout_ms Timeout in milliseconds
+ */
+void heymac_schedule_timeout(struct heymac_context *ctx, uint32_t timeout_ms);
+
+/**
+ * @brief Schedule beacon work
+ *
+ * @param ctx HeyMac context
+ * @param interval_ms Interval in milliseconds
+ */
+void heymac_schedule_beacon(struct heymac_context *ctx, uint32_t interval_ms);
+
+/**
+ * @brief Cancel scheduled timers
+ *
+ * @param ctx HeyMac context
+ */
+void heymac_cancel_timers(struct heymac_context *ctx);
+
+/**
+ * @brief Initialize HeyMac interface
+ *
+ * @param iface Network interface
+ */
+void heymac_iface_init(struct net_if *iface);
+
 /* Helper functions */
 static inline bool heymac_addr_is_short(const struct heymac_addr *addr)
 {
@@ -179,6 +264,14 @@ static inline size_t heymac_addr_len(const struct heymac_addr *addr)
 {
 	return heymac_addr_is_short(addr) ? HEYMAC_ADDR_SHORT_LEN : HEYMAC_ADDR_LONG_LEN;
 }
+
+/* Layer 2 definitions for Zephyr network stack */
+#define HEYMAC_L2 HEYMAC
+NET_L2_DECLARE_PUBLIC(HEYMAC_L2);
+
+#ifdef CONFIG_NET_L2_HEYMAC
+#define HEYMAC_L2_CTX_TYPE struct heymac_context
+#endif
 
 #ifdef __cplusplus
 }

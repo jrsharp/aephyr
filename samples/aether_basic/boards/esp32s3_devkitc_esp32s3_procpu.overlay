@@ -1,0 +1,53 @@
+/*
+ * Copyright (c) 2025 Æther authors
+ *
+ * SPDX-License-Identifier: Apache-2.0
+ */
+
+/ {
+	chosen {
+		zephyr,lora = &sx1262;
+	};
+	
+	aliases {
+		lora0 = &sx1262;
+	};
+};
+
+/* SPI2 pinctrl configuration */
+&pinctrl {
+	spi2_default: spi2_default {
+		group1 {
+			pinmux = <SPIM2_MISO_GPIO13>,
+				 <SPIM2_MOSI_GPIO11>,
+				 <SPIM2_SCLK_GPIO12>;
+		};
+	};
+};
+
+/* Configure SPI2 with ESP32-S3 GPIO matrix */
+&spi2 {
+	status = "okay";
+	pinctrl-0 = <&spi2_default>;
+	pinctrl-names = "default";
+	cs-gpios = <&gpio0 10 GPIO_ACTIVE_LOW>;
+	
+	/* Attach the SX1262 to this SPI bus */
+	#address-cells = <1>;
+	#size-cells = <0>;
+	
+	sx1262: sx1262@0 {
+		compatible = "semtech,sx1262";
+		status = "okay";
+		spi-max-frequency = <8000000>;
+		reg = <0>;
+		
+		/* SX1262 control pins */
+		reset-gpios = <&gpio0 9 GPIO_ACTIVE_LOW>;
+		busy-gpios = <&gpio0 3 GPIO_ACTIVE_HIGH>;
+		dio1-gpios = <&gpio0 8 GPIO_ACTIVE_HIGH>;
+		
+		/* Antenna switch control - disabled for testing */
+		/* rx-enable-gpios = <&gpio0 19 GPIO_ACTIVE_HIGH>; */
+	};
+};

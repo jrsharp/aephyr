@@ -63,19 +63,44 @@ int main(void)
 	int ret;
 	uint32_t hello_count = 0;
 
+	/* Very early debug to test logging */
+	printk("=== MAIN STARTING ===\n");
 	LOG_INF("Æther Basic Node Starting");
 
 	/* Wait for network interface to be available */
 	aether_iface = net_if_get_default();
 	if (!aether_iface) {
 		LOG_ERR("No network interface available");
+		
+		/* List all available interfaces for debugging */
+		struct net_if *iface;
+		int count = 0;
+		STRUCT_SECTION_FOREACH(net_if, iface) {
+			LOG_INF("Found interface %d: %p", count, iface);
+			count++;
+		}
+		LOG_INF("Total interfaces found: %d", count);
+		
 		return -ENODEV;
 	}
+	
+	LOG_INF("Found default interface: %p", aether_iface);
 
+	/* Bring up the network interface */
+	LOG_INF("Bringing up network interface...");
+	net_if_up(aether_iface);
+	
 	/* Wait for interface to be up */
-	while (!net_if_is_up(aether_iface)) {
-		LOG_INF("Waiting for network interface...");
+	int attempts = 0;
+	while (!net_if_is_up(aether_iface) && attempts < 20) {
+		LOG_INF("Waiting for network interface... (attempt %d)", attempts + 1);
 		k_sleep(K_MSEC(500));
+		attempts++;
+	}
+	
+	if (!net_if_is_up(aether_iface)) {
+		LOG_ERR("Failed to bring up network interface after %d attempts", attempts);
+		return -ENETDOWN;
 	}
 
 	LOG_INF("Network interface is up");

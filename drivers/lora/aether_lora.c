@@ -12,7 +12,6 @@ LOG_MODULE_REGISTER(aether_lora, CONFIG_AETHER_LORA_LOG_LEVEL);
 #include <zephyr/drivers/lora.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
-#include <zephyr/net/net_pkt_util.h>
 #include <zephyr/net/heymac.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <string.h>
@@ -37,12 +36,6 @@ struct aether_lora_ctx {
 	/* LoRa configuration */
 	struct lora_modem_config modem_config;
 	
-	/* Statistics */
-	uint32_t rx_packets;
-	uint32_t tx_packets;
-	uint32_t rx_errors;
-	uint32_t tx_errors;
-	
 	bool running;
 };
 
@@ -50,7 +43,7 @@ struct aether_lora_ctx {
 static void aether_lora_rx_thread(void *p1, void *p2, void *p3);
 static void aether_lora_tx_thread(void *p1, void *p2, void *p3);
 static void aether_lora_rx_callback(const struct device *dev, uint8_t *data, 
-				    uint16_t size, int16_t rssi, int8_t snr);
+				    uint16_t size, int16_t rssi, int8_t snr, void *user_data);
 
 /* LoRa RX thread */
 static void aether_lora_rx_thread(void *p1, void *p2, void *p3)
@@ -103,13 +96,16 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Get packet data */
-		data = net_pkt_get_data(pkt);
+		/* Get packet data and length */
 		len = net_pkt_get_len(pkt);
+		
+		/* For simplicity, use the first buffer's data directly */
+		struct net_buf *buf = pkt->buffer;
+		data = buf->data;
+		len = buf->len;
 
 		if (!data || len == 0 || len > 255) {
 			LOG_ERR("Invalid packet data: len=%zu", len);
-			ctx->tx_errors++;
 			net_pkt_unref(pkt);
 			continue;
 		}
@@ -118,9 +114,7 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 		ret = lora_send(ctx->lora_dev, data, len);
 		if (ret < 0) {
 			LOG_ERR("LoRa transmission failed: %d", ret);
-			ctx->tx_errors++;
 		} else {
-			ctx->tx_packets++;
 			LOG_DBG("LoRa packet transmitted, len=%zu", len);
 		}
 
@@ -132,17 +126,26 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 
 /* LoRa RX callback */
 static void aether_lora_rx_callback(const struct device *dev, uint8_t *data, 
-				    uint16_t size, int16_t rssi, int8_t snr)
+				    uint16_t size, int16_t rssi, int8_t snr, void *user_data)
 {
 	struct aether_lora_ctx *ctx = dev->data;
+	struct heymac_context *heymac_ctx;
 	struct net_pkt *pkt;
 	int ret;
 
 	ARG_UNUSED(rssi);
 	ARG_UNUSED(snr);
+	ARG_UNUSED(user_data);
 
 	if (!ctx || !data || size == 0) {
 		LOG_ERR("Invalid RX callback parameters");
+		return;
+	}
+
+	/* Get HeyMac context from network interface */
+	heymac_ctx = net_if_l2_data(ctx->iface);
+	if (!heymac_ctx) {
+		LOG_ERR("No HeyMac context");
 		return;
 	}
 
@@ -150,7 +153,7 @@ static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
 	pkt = net_pkt_rx_alloc_with_buffer(ctx->iface, size, AF_UNSPEC, 0, K_NO_WAIT);
 	if (!pkt) {
 		LOG_ERR("Failed to allocate RX packet");
-		ctx->rx_errors++;
+		heymac_ctx->rx_errors++;
 		return;
 	}
 
@@ -158,7 +161,7 @@ static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
 	ret = net_pkt_write(pkt, data, size);
 	if (ret < 0) {
 		LOG_ERR("Failed to write RX data: %d", ret);
-		ctx->rx_errors++;
+		heymac_ctx->rx_errors++;
 		net_pkt_unref(pkt);
 		return;
 	}
@@ -170,12 +173,12 @@ static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
 	ret = k_msgq_put(&ctx->rx_msgq, &pkt, K_NO_WAIT);
 	if (ret < 0) {
 		LOG_ERR("RX queue full, dropping packet");
-		ctx->rx_errors++;
+		heymac_ctx->rx_errors++;
 		net_pkt_unref(pkt);
 		return;
 	}
 
-	ctx->rx_packets++;
+	heymac_ctx->rx_packets++;
 	LOG_DBG("LoRa packet received, len=%d, rssi=%d, snr=%d", size, rssi, snr);
 }
 
@@ -225,7 +228,7 @@ static int aether_lora_start(const struct device *dev)
 	}
 
 	/* Start RX mode */
-	ret = lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+	ret = lora_recv_async(ctx->lora_dev, aether_lora_rx_callback, NULL);
 	if (ret < 0) {
 		LOG_ERR("Failed to start LoRa RX: %d", ret);
 		return ret;
@@ -261,7 +264,7 @@ static int aether_lora_stop(const struct device *dev)
 	ctx->running = false;
 
 	/* Stop LoRa */
-	lora_recv_async(ctx->lora_dev, NULL);  /* Disable RX callback */
+	lora_recv_async(ctx->lora_dev, NULL, NULL);  /* Disable RX callback */
 
 	/* Wait for threads to stop */
 	k_thread_join(&ctx->rx_thread, K_SECONDS(1));
@@ -323,13 +326,14 @@ static int aether_lora_iface_enable(struct net_if *iface, bool state)
 	}
 }
 
+/* Network interface API structure */
+static const struct net_if_api aether_lora_iface_api = {
+	.init = aether_lora_iface_init,
+};
+
 /* HeyMac radio API structure */
 static const struct heymac_radio_api aether_lora_radio_api = {
-	.iface_api = {
-		.init = aether_lora_iface_init,
-		.send = aether_lora_iface_send,
-		.enable = aether_lora_iface_enable,
-	},
+	.iface_api = aether_lora_iface_api,
 	.set_channel = aether_lora_set_channel,
 	.set_power = aether_lora_set_power,
 	.set_network_id = aether_lora_set_network_id,
@@ -345,9 +349,17 @@ static int aether_lora_init(const struct device *dev)
 	const struct device *lora_dev;
 
 	/* Get LoRa device */
+	LOG_INF("Initializing Æther LoRa driver...");
 	lora_dev = DEVICE_DT_GET(DT_CHOSEN(zephyr_lora));
+	if (!lora_dev) {
+		LOG_ERR("LoRa device not found in device tree");
+		return -ENODEV;
+	}
+	
+	LOG_INF("Found LoRa device: %s", lora_dev->name);
+	
 	if (!device_is_ready(lora_dev)) {
-		LOG_ERR("LoRa device not ready");
+		LOG_ERR("LoRa device not ready: %s", lora_dev->name);
 		return -ENODEV;
 	}
 
@@ -357,7 +369,7 @@ static int aether_lora_init(const struct device *dev)
 	/* Initialize default modem configuration */
 	ctx->modem_config.frequency = 915000000;  /* 915 MHz */
 	ctx->modem_config.bandwidth = BW_125_KHZ;
-	ctx->modem_config.datarate = SF_7;
+	ctx->modem_config.datarate = SF_10;  /* Use SF10 as it works reliably */
 	ctx->modem_config.preamble_len = 8;
 	ctx->modem_config.coding_rate = CR_4_5;
 	ctx->modem_config.tx_power = CONFIG_AETHER_LORA_TX_POWER;
@@ -378,10 +390,10 @@ static struct aether_lora_ctx aether_lora_ctx_0;
 
 DEVICE_DEFINE(aether_lora_0, "aether_lora", aether_lora_init, NULL,
 	      &aether_lora_ctx_0, NULL, POST_KERNEL,
-	      CONFIG_APPLICATION_INIT_PRIORITY, &aether_lora_radio_api);
+	      CONFIG_KERNEL_INIT_PRIORITY_DEVICE, &aether_lora_radio_api);
 
 /* Network interface registration */
 NET_DEVICE_INIT(aether_lora_net, "aether_lora_net", aether_lora_init, NULL,
-		&aether_lora_ctx_0, NULL, CONFIG_ETH_INIT_PRIORITY,
-		&aether_lora_radio_api, HEYMAC_L2, NET_L2_GET_CTX_TYPE(HEYMAC_L2),
+		&aether_lora_ctx_0, NULL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
+		&aether_lora_iface_api, HEYMAC_L2, HEYMAC_L2_CTX_TYPE,
 		HEYMAC_MAX_PAYLOAD);

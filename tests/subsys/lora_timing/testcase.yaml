@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+tests:
+  aether.lora.timing:
+    tags: aether lora timing
+    platform_allow: qemu_x86

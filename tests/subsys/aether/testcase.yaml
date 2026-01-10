@@ -1,0 +1,6 @@
+# SPDX-License-Identifier: Apache-2.0
+
+tests:
+  aether.mesh.header:
+    tags: aether mesh
+    platform_allow: native_sim

@@ -6,12 +6,7 @@ project(aether_mesh_test)
 
 target_sources(app PRIVATE src/main.c)
 
-# Include just the mesh header parsing/building (extracted for testing)
-target_sources(app PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../../subsys/net/aether/aether_mesh.c
-    ${CMAKE_CURRENT_SOURCE_DIR}/../../../subsys/net/l2/heymac/heymac.c
-)
-
+# Include paths for the module headers
 target_include_directories(app PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/../../../include
 )

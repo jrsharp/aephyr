@@ -3,4 +3,4 @@
 tests:
   aether.mesh.header:
     tags: aether mesh
-    platform_allow: native_sim
+    platform_allow: qemu_x86

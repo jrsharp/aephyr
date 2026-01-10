@@ -3,4 +3,4 @@
 tests:
   aether.heymac.header:
     tags: aether heymac
-    platform_allow: native_sim
+    platform_allow: qemu_x86

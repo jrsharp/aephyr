@@ -28,6 +28,9 @@ static int heymac_l2_send(struct net_if *iface, struct net_pkt *pkt)
 {
 	struct heymac_context *ctx;
 	const struct heymac_radio_api *radio_api;
+	struct heymac_hdr hdr;
+	uint8_t hdr_buf[32];
+	int hdr_len;
 	int ret;
 
 	if (!iface || !pkt) {
@@ -46,14 +49,47 @@ static int heymac_l2_send(struct net_if *iface, struct net_pkt *pkt)
 
 	k_mutex_lock(&ctx->tx_lock, K_FOREVER);
 
-	/* Send via radio - let the driver handle HeyMac framing */
+	/* Build HeyMac header for data frame */
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.version_type = HEYMAC_FRM_TYPE_DATA;
+	hdr.frame_ctrl = HEYMAC_FCTL_S | HEYMAC_FCTL_M;  /* Source present, MAC payload */
+
+	/* Include network ID */
+	hdr.frame_ctrl |= HEYMAC_FCTL_N;
+	hdr.net_id = ctx->net_id;
+
+	/* Set source address */
+	memcpy(&hdr.src_addr, &ctx->local_addr, sizeof(hdr.src_addr));
+	if (ctx->local_addr.type == 1) {
+		hdr.frame_ctrl |= HEYMAC_FCTL_L;  /* Long address */
+	}
+
+	hdr.seq_no = ctx->tx_seq_no++;
+
+	/* Build header into buffer */
+	hdr_len = heymac_build_header(&hdr, hdr_buf, sizeof(hdr_buf));
+	if (hdr_len < 0) {
+		LOG_ERR("Failed to build HeyMac header: %d", hdr_len);
+		k_mutex_unlock(&ctx->tx_lock);
+		return hdr_len;
+	}
+
+	/* Prepend HeyMac header to packet */
+	ret = net_pkt_push(pkt, hdr_buf, hdr_len);
+	if (ret < 0) {
+		LOG_ERR("Failed to prepend HeyMac header: %d", ret);
+		k_mutex_unlock(&ctx->tx_lock);
+		return ret;
+	}
+
+	/* Send via radio */
 	ret = radio_api->tx(net_if_get_device(iface), pkt);
 	if (ret < 0) {
 		LOG_ERR("Radio TX failed: %d", ret);
 		ctx->tx_errors++;
 	} else {
 		ctx->tx_packets++;
-		LOG_DBG("Transmitted frame, len=%zu", net_pkt_get_len(pkt));
+		LOG_DBG("Transmitted HeyMac frame, len=%zu", net_pkt_get_len(pkt));
 	}
 
 	k_mutex_unlock(&ctx->tx_lock);

@@ -440,10 +440,22 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 
 	case AETHER_MSG_DATA:
 		/* Check if packet is for us */
-		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
-			/* Remove mesh header and pass to application */
+		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0 ||
+		    memcmp(hdr.dst, "\xff\xff\xff\xff\xff\xff", 6) == 0) {
+			/* Remove mesh header */
 			net_pkt_pull(pkt, hdr_len);
-			net_recv_data(iface, pkt);
+
+			/* Call application callback if registered */
+			if (ctx->recv_cb) {
+				size_t payload_len = net_pkt_get_len(pkt);
+				uint8_t *payload = pkt->buffer ? pkt->buffer->data : NULL;
+
+				if (payload && payload_len > 0) {
+					ctx->recv_cb(iface, hdr.src, payload,
+						     payload_len, ctx->recv_cb_user_data);
+				}
+			}
+			net_pkt_unref(pkt);
 		} else {
 			/* Forward packet */
 			LOG_DBG("Forwarding packet to %02x:%02x:%02x:%02x:%02x:%02x",
@@ -529,4 +541,21 @@ int aether_mesh_get_route_count(struct net_if *iface)
 	k_mutex_unlock(&ctx->route_lock);
 
 	return count;
+}
+
+int aether_mesh_register_recv_callback(struct net_if *iface,
+				       aether_mesh_recv_cb_t cb,
+				       void *user_data)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	if (!ctx || ctx->iface != iface) {
+		return -EINVAL;
+	}
+
+	ctx->recv_cb = cb;
+	ctx->recv_cb_user_data = user_data;
+
+	LOG_DBG("Receive callback registered");
+	return 0;
 }

@@ -98,26 +98,44 @@ struct aether_route {
 	bool active;           /* Route is active */
 };
 
+/**
+ * @brief Callback for received mesh data
+ *
+ * @param iface Network interface
+ * @param src Source address (6 bytes)
+ * @param data Received data
+ * @param len Data length
+ * @param user_data User-provided context
+ */
+typedef void (*aether_mesh_recv_cb_t)(struct net_if *iface,
+				      const uint8_t src[6],
+				      const uint8_t *data, size_t len,
+				      void *user_data);
+
 /* Æther mesh context */
 struct aether_mesh_ctx {
 	struct net_if *iface;
 	uint16_t mesh_net_id;
 	uint8_t local_addr[6];
 	uint8_t seq_no;
-	
+
+	/* Application receive callback */
+	aether_mesh_recv_cb_t recv_cb;
+	void *recv_cb_user_data;
+
 	/* Neighbor table */
 	struct aether_neighbor neighbors[CONFIG_AETHER_MAX_NEIGHBORS];
 	struct k_mutex neighbor_lock;
-	
+
 	/* Routing table */
 	struct aether_route routes[CONFIG_AETHER_MAX_ROUTES];
 	struct k_mutex route_lock;
-	
+
 	/* Work queues and threads */
 	struct k_work_q mesh_workq;
 	struct k_work_delayable hello_work;
 	struct k_work_delayable route_maintenance_work;
-	
+
 	/* Statistics */
 	uint32_t hello_sent;
 	uint32_t hello_received;
@@ -217,6 +235,18 @@ int aether_mesh_add_route(struct net_if *iface, const uint8_t dest[6],
  * @param pkt Received packet
  */
 void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt);
+
+/**
+ * @brief Register callback for received mesh data
+ *
+ * @param iface Network interface
+ * @param cb Callback function
+ * @param user_data User context passed to callback
+ * @return 0 on success, negative error code otherwise
+ */
+int aether_mesh_register_recv_callback(struct net_if *iface,
+				       aether_mesh_recv_cb_t cb,
+				       void *user_data);
 
 /**
  * @brief Build Aether mesh header

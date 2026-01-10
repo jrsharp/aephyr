@@ -23,8 +23,8 @@ static void aether_hello_work_handler(struct k_work *work);
 static void aether_route_maintenance_handler(struct k_work *work);
 static int aether_mesh_parse_header(const uint8_t *buf, size_t len, 
                                     struct aether_mesh_hdr *hdr);
-static int aether_mesh_build_header(const struct aether_mesh_hdr *hdr,
-                                    uint8_t *buf, size_t len);
+int aether_mesh_build_header(const struct aether_mesh_hdr *hdr,
+                             uint8_t *buf, size_t len);
 
 /* Mesh header parsing */
 static int aether_mesh_parse_header(const uint8_t *buf, size_t len,
@@ -72,8 +72,8 @@ static int aether_mesh_parse_header(const uint8_t *buf, size_t len,
 	return pos;  /* Return header size */
 }
 
-static int aether_mesh_build_header(const struct aether_mesh_hdr *hdr,
-                                    uint8_t *buf, size_t len)
+int aether_mesh_build_header(const struct aether_mesh_hdr *hdr,
+                             uint8_t *buf, size_t len)
 {
 	uint8_t *ptr = buf;
 	size_t pos = 0;
@@ -158,8 +158,8 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 	k_work_queue_start(&ctx->mesh_workq, NULL, K_THREAD_STACK_SIZEOF(1024),
 			   K_PRIO_COOP(2), NULL);
 
-	k_work_init(&ctx->hello_work, aether_hello_work_handler);
-	k_work_init(&ctx->route_maintenance_work, aether_route_maintenance_handler);
+	k_work_init_delayable(&ctx->hello_work, aether_hello_work_handler);
+	k_work_init_delayable(&ctx->route_maintenance_work, aether_route_maintenance_handler);
 
 	/* Start periodic hello messages */
 	k_work_schedule_for_queue(&ctx->mesh_workq, &ctx->hello_work,
@@ -178,7 +178,8 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 /* Hello message handling */
 static void aether_hello_work_handler(struct k_work *work)
 {
-	struct aether_mesh_ctx *ctx = CONTAINER_OF(work, struct aether_mesh_ctx, hello_work);
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	struct aether_mesh_ctx *ctx = CONTAINER_OF(dwork, struct aether_mesh_ctx, hello_work);
 	
 	aether_mesh_send_hello(ctx->iface);
 	
@@ -240,12 +241,8 @@ int aether_mesh_send_hello(struct net_if *iface)
 	}
 
 	/* Send via HeyMac layer */
-	ret = net_if_queue_tx(ctx->iface, pkt);
-	if (ret < 0) {
-		LOG_ERR("Failed to send hello: %d", ret);
-		net_pkt_unref(pkt);
-		return ret;
-	}
+	net_if_queue_tx(ctx->iface, pkt);
+	/* net_if_queue_tx takes ownership of the packet */
 
 	ctx->hello_sent++;
 	LOG_DBG("Hello message sent");
@@ -255,7 +252,8 @@ int aether_mesh_send_hello(struct net_if *iface)
 /* Route maintenance */
 static void aether_route_maintenance_handler(struct k_work *work)
 {
-	struct aether_mesh_ctx *ctx = CONTAINER_OF(work, struct aether_mesh_ctx, 
+	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
+	struct aether_mesh_ctx *ctx = CONTAINER_OF(dwork, struct aether_mesh_ctx, 
 						   route_maintenance_work);
 	uint32_t now = k_uptime_get_32();
 	int i;
@@ -357,14 +355,20 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		return;
 	}
 
-	buf = net_pkt_get_data(pkt);
 	len = net_pkt_get_len(pkt);
-
-	if (!buf || len < 16) {
+	if (len < 16) {
 		LOG_ERR("Mesh packet too short: %zu bytes", len);
 		net_pkt_unref(pkt);
 		return;
 	}
+
+	/* Use the first buffer's data directly */
+	if (!pkt->buffer) {
+		LOG_ERR("No buffer in packet");
+		net_pkt_unref(pkt);
+		return;
+	}
+	buf = pkt->buffer->data;
 
 	/* Parse mesh header */
 	hdr_len = aether_mesh_parse_header(buf, len, &hdr);
@@ -466,28 +470,14 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			}
 			
 			/* Update mesh header with decremented TTL */
-			uint8_t *data = net_pkt_get_data(pkt);
-			if (data) {
-				data[2] = hdr.ttl;  /* TTL is at offset 2 in mesh header */
+			if (pkt->buffer && pkt->buffer->data) {
+				pkt->buffer->data[2] = hdr.ttl;  /* TTL is at offset 2 in mesh header */
 			}
 			
-			/* Re-encapsulate with HeyMac header for next hop */
-			struct heymac_ctx *heymac_ctx = net_if_l2_data(iface);
-			if (heymac_ctx) {
-				ret = heymac_l2_send(iface, pkt, next_hop);
-				if (ret < 0) {
-					LOG_ERR("Failed to forward packet: %d", ret);
-					ctx->packets_dropped++;
-					net_pkt_unref(pkt);
-				} else {
-					ctx->packets_forwarded++;
-					LOG_DBG("Packet forwarded successfully");
-				}
-			} else {
-				LOG_ERR("No HeyMac context, dropping packet");
-				ctx->packets_dropped++;
-				net_pkt_unref(pkt);
-			}
+			/* Forward packet via L2 layer */
+			net_if_queue_tx(iface, pkt);
+			ctx->packets_forwarded++;
+			LOG_DBG("Packet forwarded to next hop");
 		}
 		break;
 

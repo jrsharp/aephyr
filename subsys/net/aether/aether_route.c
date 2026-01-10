@@ -233,12 +233,8 @@ static int aether_mesh_send_rreq(struct net_if *iface, const uint8_t dest[6])
 	}
 
 	/* Send packet */
-	ret = net_if_queue_tx(iface, pkt);
-	if (ret < 0) {
-		LOG_ERR("Failed to send RREQ: %d", ret);
-		net_pkt_unref(pkt);
-		return ret;
-	}
+	net_if_queue_tx(iface, pkt);
+	/* net_if_queue_tx takes ownership of the packet */
 
 	ctx->route_requests++;
 	LOG_DBG("RREQ sent for %02x:%02x:%02x:%02x:%02x:%02x",
@@ -318,12 +314,8 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 	}
 
 	/* Send packet */
-	ret = net_if_queue_tx(iface, pkt);
-	if (ret < 0) {
-		LOG_ERR("Failed to send mesh data: %d", ret);
-		net_pkt_unref(pkt);
-		return ret;
-	}
+	net_if_queue_tx(iface, pkt);
+	/* net_if_queue_tx takes ownership of the packet */
 
 	LOG_DBG("Mesh data sent to %02x:%02x:%02x:%02x:%02x:%02x, len=%zu",
 		dst[0], dst[1], dst[2], dst[3], dst[4], dst[5], len);

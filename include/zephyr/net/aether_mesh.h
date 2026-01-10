@@ -115,8 +115,8 @@ struct aether_mesh_ctx {
 	
 	/* Work queues and threads */
 	struct k_work_q mesh_workq;
-	struct k_work hello_work;
-	struct k_work route_maintenance_work;
+	struct k_work_delayable hello_work;
+	struct k_work_delayable route_maintenance_work;
 	
 	/* Statistics */
 	uint32_t hello_sent;
@@ -217,6 +217,17 @@ int aether_mesh_add_route(struct net_if *iface, const uint8_t dest[6],
  * @param pkt Received packet
  */
 void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt);
+
+/**
+ * @brief Build Aether mesh header
+ *
+ * @param hdr Header structure
+ * @param buf Output buffer
+ * @param len Buffer length
+ * @return Header size on success, negative error code otherwise
+ */
+int aether_mesh_build_header(const struct aether_mesh_hdr *hdr,
+                             uint8_t *buf, size_t len);
 
 /**
  * @brief Calculate mesh header size based on flags

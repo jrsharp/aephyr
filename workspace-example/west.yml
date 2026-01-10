@@ -1,0 +1,23 @@
+# Example west.yml for creating a workspace that uses the Aether module
+# Place this in a new workspace directory, NOT inside the aephyr module itself
+
+manifest:
+  remotes:
+    - name: zephyrproject-rtos
+      url-base: https://github.com/zephyrproject-rtos
+    - name: local
+      url-base: file:///Users/jrsharp/src
+
+  projects:
+    - name: zephyr
+      remote: zephyrproject-rtos
+      revision: v4.1.0
+      import: true
+
+    - name: aephyr
+      remote: local
+      revision: main
+      path: modules/aether
+
+  self:
+    path: zephyr-aether-workspace

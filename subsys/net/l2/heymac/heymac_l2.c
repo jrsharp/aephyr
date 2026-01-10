@@ -29,6 +29,7 @@ static int heymac_l2_send(struct net_if *iface, struct net_pkt *pkt)
 	struct heymac_context *ctx;
 	const struct heymac_radio_api *radio_api;
 	struct heymac_hdr hdr;
+	struct net_buf *hdr_frag;
 	uint8_t hdr_buf[32];
 	int hdr_len;
 	int ret;
@@ -74,13 +75,19 @@ static int heymac_l2_send(struct net_if *iface, struct net_pkt *pkt)
 		return hdr_len;
 	}
 
-	/* Prepend HeyMac header to packet */
-	ret = net_pkt_push(pkt, hdr_buf, hdr_len);
-	if (ret < 0) {
-		LOG_ERR("Failed to prepend HeyMac header: %d", ret);
+	/* Allocate fragment for HeyMac header */
+	hdr_frag = net_pkt_get_frag(pkt, hdr_len, K_NO_WAIT);
+	if (!hdr_frag) {
+		LOG_ERR("Failed to allocate HeyMac header fragment");
 		k_mutex_unlock(&ctx->tx_lock);
-		return ret;
+		return -ENOMEM;
 	}
+
+	/* Copy header into fragment */
+	net_buf_add_mem(hdr_frag, hdr_buf, hdr_len);
+
+	/* Insert header fragment at front of packet */
+	net_pkt_frag_insert(pkt, hdr_frag);
 
 	/* Send via radio */
 	ret = radio_api->tx(net_if_get_device(iface), pkt);

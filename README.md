@@ -276,6 +276,15 @@ This implementation follows the Æther Protocol Specification v1.2, including:
 - Integration tests: `tests/integration/`
 - Sample applications: `samples/`
 
+## Acknowledgments
+
+The HeyMac protocol was designed and specified by **Dean Hall**. This implementation is based on his original work:
+
+- [HeyMac Protocol Specification](https://github.com/dwhall/HeyMac) - Original protocol design and Python reference implementation
+- HeyMac provides the Layer 2 foundation that enables Æther's mesh networking capabilities
+
+Thanks to Dean for creating an elegant, LoRa-optimized MAC protocol and making it available to the community.
+
 ## License
 
 SPDX-License-Identifier: Apache-2.0

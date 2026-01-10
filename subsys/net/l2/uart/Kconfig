@@ -1,0 +1,37 @@
+# SPDX-License-Identifier: Apache-2.0
+
+menuconfig AETHER_UART
+	bool "Aether UART L2 transport"
+	depends on SERIAL
+	depends on NETWORKING
+	help
+	  Enable Aether mesh networking over UART.
+	  This provides a simple point-to-point transport for connecting
+	  Aether mesh nodes via serial links. Useful for:
+	  - Connecting to gateway devices
+	  - Testing with QEMU virtual UARTs
+	  - Wired backbone links between mesh segments
+
+if AETHER_UART
+
+config AETHER_UART_RX_STACK_SIZE
+	int "RX thread stack size"
+	default 1024
+	help
+	  Stack size for the UART receive thread.
+
+config AETHER_UART_RX_THREAD_PRIO
+	int "RX thread priority"
+	default 7
+	help
+	  Priority for the UART receive thread.
+
+config AETHER_UART_LOG_LEVEL
+	int "Aether UART log level"
+	default 3
+	range 0 4
+	help
+	  Log level for the Aether UART L2 transport.
+	  0=OFF, 1=ERR, 2=WRN, 3=INF, 4=DBG
+
+endif # AETHER_UART

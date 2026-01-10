@@ -50,11 +50,22 @@ config HEYMAC_MAX_FRAME_SIZE
 
 endif # NET_L2_HEYMAC
 
+config HEYMAC_BEACON_INTERVAL_MS
+	int "Beacon interval (milliseconds)"
+	depends on NET_L2_HEYMAC
+	default 30000
+	range 5000 120000
+	help
+	  Interval between beacon transmissions in milliseconds.
+
+rsource "subsys/net/l2/uart/Kconfig"
+
 config AETHER_MESH
 	bool "Æther mesh networking support"
-	depends on NET_L2_HEYMAC
+	depends on NET_L2_HEYMAC || AETHER_UART
 	help
-	  Enable Æther mesh networking protocol for multi-hop LoRa networks.
+	  Enable Æther mesh networking protocol for multi-hop networks.
+	  Works over HeyMac (LoRa) or UART transports.
 
 if AETHER_MESH
 

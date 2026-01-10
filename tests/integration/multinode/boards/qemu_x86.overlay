@@ -1,0 +1,17 @@
+/*
+ * Device tree overlay for QEMU x86 multinode test
+ * Maps a second UART for Aether mesh communication
+ */
+
+/ {
+	chosen {
+		/* Use uart1 for Aether mesh */
+		aether-uart = &uart1;
+	};
+};
+
+/* Enable second UART for mesh communication */
+&uart1 {
+	status = "okay";
+	current-speed = <115200>;
+};

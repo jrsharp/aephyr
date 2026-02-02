@@ -10,13 +10,40 @@ LOG_MODULE_REGISTER(aether_mesh, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/kernel.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
+#ifdef CONFIG_NET_L2_HEYMAC
 #include <zephyr/net/heymac.h>
+#endif
 #include <zephyr/net/aether_mesh.h>
 #include <zephyr/random/random.h>
 #include <string.h>
 
+#ifndef CONFIG_NET_L2_HEYMAC
+/* Fallback address/network ID functions for non-HeyMac transports */
+static int aether_get_addr_fallback(struct net_if *iface, uint8_t addr[6])
+{
+	ARG_UNUSED(iface);
+	/* Generate random locally-administered address */
+	for (int i = 0; i < 6; i++) {
+		addr[i] = sys_rand32_get() & 0xFF;
+	}
+	addr[0] |= 0x02;  /* Locally administered */
+	addr[0] &= ~0x01; /* Unicast */
+	return 0;
+}
+
+static uint16_t aether_get_network_id_fallback(struct net_if *iface)
+{
+	ARG_UNUSED(iface);
+	return 0x0001;  /* Default network ID */
+}
+#endif /* !CONFIG_NET_L2_HEYMAC */
+
 /* Global mesh context - one per interface */
 struct aether_mesh_ctx *g_mesh_ctx;
+
+/* Work queue stack */
+#define MESH_WORKQ_STACK_SIZE 1024
+K_THREAD_STACK_DEFINE(mesh_workq_stack, MESH_WORKQ_STACK_SIZE);
 
 /* Forward declarations */
 static void aether_hello_work_handler(struct k_work *work);
@@ -114,7 +141,6 @@ int aether_mesh_build_header(const struct aether_mesh_hdr *hdr,
 int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 {
 	struct aether_mesh_ctx *ctx;
-	struct heymac_addr local_addr;
 	int ret;
 
 	if (!iface) {
@@ -132,22 +158,34 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 	ctx->mesh_net_id = mesh_net_id;
 	ctx->seq_no = sys_rand32_get() & 0xFF;
 
-	/* Get local address from HeyMac layer */
-	ret = heymac_get_addr(iface, &local_addr);
+	/* Get local address from L2 layer */
+#ifdef CONFIG_NET_L2_HEYMAC
+	{
+		struct heymac_addr local_addr;
+		ret = heymac_get_addr(iface, &local_addr);
+		if (ret < 0) {
+			LOG_ERR("Failed to get HeyMac address: %d", ret);
+			k_free(ctx);
+			return ret;
+		}
+		/* Convert address to mesh format (always use 6-byte addresses) */
+		if (heymac_addr_is_short(&local_addr)) {
+			/* Expand short address to 6 bytes */
+			memset(ctx->local_addr, 0, 4);
+			memcpy(&ctx->local_addr[4], local_addr.short_addr, 2);
+		} else {
+			memcpy(ctx->local_addr, local_addr.long_addr, 6);
+		}
+	}
+#else
+	/* Use fallback for non-HeyMac transports (e.g., UART) */
+	ret = aether_get_addr_fallback(iface, ctx->local_addr);
 	if (ret < 0) {
-		LOG_ERR("Failed to get HeyMac address: %d", ret);
+		LOG_ERR("Failed to get local address: %d", ret);
 		k_free(ctx);
 		return ret;
 	}
-
-	/* Convert address to mesh format (always use 6-byte addresses) */
-	if (heymac_addr_is_short(&local_addr)) {
-		/* Expand short address to 6 bytes */
-		memset(ctx->local_addr, 0, 4);
-		memcpy(&ctx->local_addr[4], local_addr.short_addr, 2);
-	} else {
-		memcpy(ctx->local_addr, local_addr.long_addr, 6);
-	}
+#endif
 
 	/* Initialize mutexes */
 	k_mutex_init(&ctx->neighbor_lock);
@@ -155,7 +193,8 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 
 	/* Initialize work queue and work items */
 	k_work_queue_init(&ctx->mesh_workq);
-	k_work_queue_start(&ctx->mesh_workq, NULL, K_THREAD_STACK_SIZEOF(1024),
+	k_work_queue_start(&ctx->mesh_workq, mesh_workq_stack,
+			   K_THREAD_STACK_SIZEOF(mesh_workq_stack),
 			   K_PRIO_COOP(2), NULL);
 
 	k_work_init_delayable(&ctx->hello_work, aether_hello_work_handler);
@@ -212,8 +251,12 @@ int aether_mesh_send_hello(struct net_if *iface)
 	hdr.length = 0;  /* No payload */
 
 	/* Optimize network ID */
-	uint16_t heymac_net_id = heymac_get_network_id(iface);
-	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != heymac_net_id) {
+#ifdef CONFIG_NET_L2_HEYMAC
+	uint16_t l2_net_id = heymac_get_network_id(iface);
+#else
+	uint16_t l2_net_id = aether_get_network_id_fallback(iface);
+#endif
+	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != l2_net_id) {
 		hdr.flags |= AETHER_FCTL_MESH_NET_ID;
 		hdr.mesh_net_id = ctx->mesh_net_id;
 	}

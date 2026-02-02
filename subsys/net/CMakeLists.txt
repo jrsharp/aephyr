@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 
-if(CONFIG_NET_L2_HEYMAC)
+if(CONFIG_NET_L2_HEYMAC OR CONFIG_AETHER_UART)
   add_subdirectory(l2)
 endif()
 

@@ -10,8 +10,20 @@ LOG_MODULE_REGISTER(aether_route, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/kernel.h>
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
+#ifdef CONFIG_NET_L2_HEYMAC
+#include <zephyr/net/heymac.h>
+#endif
 #include <zephyr/net/aether_mesh.h>
 #include <string.h>
+
+#ifndef CONFIG_NET_L2_HEYMAC
+/* Fallback for non-HeyMac transports */
+static inline uint16_t aether_route_get_network_id_fallback(struct net_if *iface)
+{
+	ARG_UNUSED(iface);
+	return 0x0001;  /* Default network ID */
+}
+#endif
 
 /* External reference to global mesh context */
 extern struct aether_mesh_ctx *g_mesh_ctx;
@@ -193,8 +205,12 @@ static int aether_mesh_send_rreq(struct net_if *iface, const uint8_t dest[6])
 	hdr.length = sizeof(payload);
 
 	/* Optimize network ID */
-	uint16_t heymac_net_id = heymac_get_network_id(iface);
-	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != heymac_net_id) {
+#ifdef CONFIG_NET_L2_HEYMAC
+	uint16_t l2_net_id = heymac_get_network_id(iface);
+#else
+	uint16_t l2_net_id = aether_route_get_network_id_fallback(iface);
+#endif
+	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != l2_net_id) {
 		hdr.flags |= AETHER_FCTL_MESH_NET_ID;
 		hdr.mesh_net_id = ctx->mesh_net_id;
 	}
@@ -278,8 +294,12 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 	hdr.length = len;
 
 	/* Optimize network ID */
-	uint16_t heymac_net_id = heymac_get_network_id(iface);
-	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != heymac_net_id) {
+#ifdef CONFIG_NET_L2_HEYMAC
+	uint16_t l2_net_id = heymac_get_network_id(iface);
+#else
+	uint16_t l2_net_id = aether_route_get_network_id_fallback(iface);
+#endif
+	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != l2_net_id) {
 		hdr.flags |= AETHER_FCTL_MESH_NET_ID;
 		hdr.mesh_net_id = ctx->mesh_net_id;
 	}

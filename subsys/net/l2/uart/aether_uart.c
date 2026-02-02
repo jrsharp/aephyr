@@ -22,6 +22,7 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/net_l2.h>
+#include <zephyr/net/aether_uart.h>
 
 LOG_MODULE_REGISTER(aether_uart, CONFIG_AETHER_UART_LOG_LEVEL);
 
@@ -312,17 +313,10 @@ static const struct net_if_api aether_uart_iface_api = {
 /* Device instance */
 static struct aether_uart_ctx aether_uart_ctx_0;
 
-#if DT_HAS_CHOSEN(aether_uart)
-DEVICE_DT_DEFINE(DT_CHOSEN(aether_uart),
-		 aether_uart_init, NULL,
-		 &aether_uart_ctx_0, NULL,
-		 POST_KERNEL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
-		 &aether_uart_iface_api);
-
+/* Network device - uses uart1 for mesh communication */
 NET_DEVICE_INIT(aether_uart_net, "aether_uart",
 		aether_uart_init, NULL,
 		&aether_uart_ctx_0, NULL,
 		CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
 		&aether_uart_iface_api,
-		AETHER_UART, NULL, AETHER_UART_MAX_FRAME);
-#endif
+		AETHER_UART, AETHER_UART_CTX_TYPE, AETHER_UART_MAX_FRAME);

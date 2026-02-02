@@ -17,6 +17,7 @@
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/net/net_if.h>
+#include <zephyr/net/aether_uart.h>
 #include <zephyr/shell/shell.h>
 #include <zephyr/random/random.h>
 #include <string.h>

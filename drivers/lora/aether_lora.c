@@ -20,30 +20,37 @@ LOG_MODULE_REGISTER(aether_lora, CONFIG_AETHER_LORA_LOG_LEVEL);
 struct aether_lora_ctx {
 	const struct device *lora_dev;
 	struct net_if *iface;
-	
+
 	/* Threading */
 	struct k_thread rx_thread;
 	struct k_thread tx_thread;
 	K_KERNEL_STACK_MEMBER(rx_stack, CONFIG_AETHER_RX_STACK_SIZE);
 	K_KERNEL_STACK_MEMBER(tx_stack, CONFIG_AETHER_TX_STACK_SIZE);
-	
+
 	/* Message queues */
 	struct k_msgq rx_msgq;
 	struct k_msgq tx_msgq;
 	char rx_msgq_buffer[CONFIG_AETHER_RX_QUEUE_SIZE * sizeof(struct net_pkt *)];
 	char tx_msgq_buffer[CONFIG_AETHER_TX_QUEUE_SIZE * sizeof(struct net_pkt *)];
-	
+
+	/* TX completion signaling for synchronous sends */
+	struct k_sem tx_done;
+	int tx_result;
+
 	/* LoRa configuration */
 	struct lora_modem_config modem_config;
-	
+
 	bool running;
 };
 
 /* Forward declarations */
 static void aether_lora_rx_thread(void *p1, void *p2, void *p3);
 static void aether_lora_tx_thread(void *p1, void *p2, void *p3);
-static void aether_lora_rx_callback(const struct device *dev, uint8_t *data, 
-				    uint16_t size, int16_t rssi, int8_t snr, void *user_data);
+static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
+				    uint16_t size, int16_t rssi, int8_t snr);
+
+/* Static context instance - forward declared for RX callback */
+static struct aether_lora_ctx aether_lora_ctx_0;
 
 /* LoRa RX thread */
 static void aether_lora_rx_thread(void *p1, void *p2, void *p3)
@@ -96,27 +103,68 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Get packet data and length */
+		/* Get total packet length */
 		len = net_pkt_get_len(pkt);
-		
-		/* For simplicity, use the first buffer's data directly */
-		struct net_buf *buf = pkt->buffer;
-		data = buf->data;
-		len = buf->len;
 
-		if (!data || len == 0 || len > 255) {
-			LOG_ERR("Invalid packet data: len=%zu", len);
+		if (len == 0 || len > 255) {
+			LOG_ERR("Invalid packet length: %zu", len);
 			net_pkt_unref(pkt);
 			continue;
 		}
 
-		/* Transmit via LoRa */
-		ret = lora_send(ctx->lora_dev, data, len);
-		if (ret < 0) {
-			LOG_ERR("LoRa transmission failed: %d", ret);
-		} else {
-			LOG_DBG("LoRa packet transmitted, len=%zu", len);
+		/* Linearize packet data - may span multiple fragments.
+		 * Static buffer to reduce stack pressure (thread is single-use). */
+		static uint8_t tx_buf[256];
+		net_pkt_cursor_init(pkt);  /* Reset cursor to start */
+		if (net_pkt_read(pkt, tx_buf, len) < 0) {
+			LOG_ERR("Failed to read packet data");
+			net_pkt_unref(pkt);
+			continue;
 		}
+		data = tx_buf;
+
+		/* Transmit via LoRa.
+		 * Stop async RX, wait for radio to be ready, send, then restart RX.
+		 * Need substantial delay - radio may be mid-packet when we stop RX. */
+		lora_recv_async(ctx->lora_dev, NULL);
+		k_msleep(200);  /* Allow radio to fully exit RX mode */
+
+		/* Retry logic:
+		 * - EBUSY: modem busy, TX never started - retry immediately
+		 * - EAGAIN: timeout, TX state unknown - wait then retry once
+		 * RX-side dedup handles any duplicate transmissions. */
+		ret = lora_send(ctx->lora_dev, data, len);
+
+		if (ret == 0) {
+			LOG_DBG("LoRa packet transmitted, len=%zu", len);
+		} else if (ret == -EBUSY) {
+			/* Modem busy - wait and retry */
+			LOG_WRN("LoRa modem busy, retrying...");
+			k_msleep(100);
+			ret = lora_send(ctx->lora_dev, data, len);
+			if (ret == 0) {
+				LOG_DBG("LoRa packet transmitted (retry), len=%zu", len);
+			} else {
+				LOG_ERR("LoRa TX failed after retry: %d", ret);
+			}
+		} else {
+			/* EAGAIN timeout - TX state unknown.
+			 * Wait for any in-flight TX to complete, then retry once.
+			 * SF10 packets take ~400-500ms, so wait 1s to be safe.
+			 * RX-side dedup filters duplicates if first TX succeeded. */
+			LOG_WRN("LoRa TX timeout (%d), wait+retry", ret);
+			k_msleep(1000);  /* Wait for potential in-flight TX */
+			ret = lora_send(ctx->lora_dev, data, len);
+			if (ret == 0) {
+				LOG_DBG("LoRa packet transmitted (after timeout), len=%zu", len);
+			} else {
+				LOG_WRN("LoRa retry also failed: %d (first TX may have succeeded)", ret);
+			}
+		}
+
+		/* Delay before restarting RX - ensure radio is fully idle */
+		k_msleep(50);
+		lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
 
 		net_pkt_unref(pkt);
 	}
@@ -124,20 +172,66 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 	LOG_DBG("Æther LoRa TX thread stopped");
 }
 
-/* LoRa RX callback */
-static void aether_lora_rx_callback(const struct device *dev, uint8_t *data, 
-				    uint16_t size, int16_t rssi, int8_t snr, void *user_data)
+/* Synchronous send with retries - for reliable messaging at mesh layer.
+ * Bypasses the TX queue and sends directly. Blocks until complete. */
+int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 {
-	struct aether_lora_ctx *ctx = dev->data;
+	struct aether_lora_ctx *ctx = &aether_lora_ctx_0;
+	int ret;
+	int attempt;
+
+	if (!ctx->running || !data || len == 0 || len > 255) {
+		return -EINVAL;
+	}
+
+	for (attempt = 0; attempt < max_retries; attempt++) {
+		if (attempt > 0) {
+			LOG_DBG("Sync TX retry %d/%d", attempt, max_retries - 1);
+			k_msleep(200 + (attempt * 100));  /* Backoff */
+		}
+
+		/* Stop RX, wait for radio to settle */
+		lora_recv_async(ctx->lora_dev, NULL);
+		k_msleep(200);
+
+		/* Attempt transmission */
+		ret = lora_send(ctx->lora_dev, (uint8_t *)data, len);
+
+		/* Restart RX */
+		k_msleep(50);
+		lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+
+		if (ret == 0) {
+			LOG_DBG("Sync TX success, len=%zu, attempts=%d", len, attempt + 1);
+			return 0;
+		}
+
+		/* On EAGAIN (timeout), packet may have been sent - wait before retry */
+		if (ret == -EAGAIN) {
+			LOG_WRN("Sync TX timeout, waiting before retry");
+			k_msleep(800);  /* Wait for potential in-flight TX */
+		}
+	}
+
+	LOG_ERR("Sync TX failed after %d attempts: %d", max_retries, ret);
+	return ret;
+}
+
+/* LoRa RX callback - note: dev is the LoRa radio, not our net device */
+static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
+				    uint16_t size, int16_t rssi, int8_t snr)
+{
+	/* Use static context - dev->data is the LoRa driver's context, not ours */
+	struct aether_lora_ctx *ctx = &aether_lora_ctx_0;
 	struct heymac_context *heymac_ctx;
 	struct net_pkt *pkt;
 	int ret;
 
+	ARG_UNUSED(dev);
 	ARG_UNUSED(rssi);
 	ARG_UNUSED(snr);
-	ARG_UNUSED(user_data);
 
-	if (!ctx || !data || size == 0) {
+	if (!ctx->iface || !data || size == 0) {
 		LOG_ERR("Invalid RX callback parameters");
 		return;
 	}
@@ -228,7 +322,7 @@ static int aether_lora_start(const struct device *dev)
 	}
 
 	/* Start RX mode */
-	ret = lora_recv_async(ctx->lora_dev, aether_lora_rx_callback, NULL);
+	ret = lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
 	if (ret < 0) {
 		LOG_ERR("Failed to start LoRa RX: %d", ret);
 		return ret;
@@ -264,7 +358,7 @@ static int aether_lora_stop(const struct device *dev)
 	ctx->running = false;
 
 	/* Stop LoRa */
-	lora_recv_async(ctx->lora_dev, NULL, NULL);  /* Disable RX callback */
+	lora_recv_async(ctx->lora_dev, NULL);  /* Disable RX callback */
 
 	/* Wait for threads to stop */
 	k_thread_join(&ctx->rx_thread, K_SECONDS(1));
@@ -385,15 +479,8 @@ static int aether_lora_init(const struct device *dev)
 	return 0;
 }
 
-/* Device instance */
-static struct aether_lora_ctx aether_lora_ctx_0;
-
-DEVICE_DEFINE(aether_lora_0, "aether_lora", aether_lora_init, NULL,
-	      &aether_lora_ctx_0, NULL, POST_KERNEL,
-	      CONFIG_KERNEL_INIT_PRIORITY_DEVICE, &aether_lora_radio_api);
-
-/* Network interface registration */
+/* Network interface registration - use high priority (90) to init after LoRa driver */
 NET_DEVICE_INIT(aether_lora_net, "aether_lora_net", aether_lora_init, NULL,
-		&aether_lora_ctx_0, NULL, CONFIG_KERNEL_INIT_PRIORITY_DEVICE,
-		&aether_lora_iface_api, HEYMAC_L2, HEYMAC_L2_CTX_TYPE,
+		&aether_lora_ctx_0, NULL, 90,
+		&aether_lora_radio_api, HEYMAC_L2, HEYMAC_L2_CTX_TYPE,
 		HEYMAC_MAX_PAYLOAD);

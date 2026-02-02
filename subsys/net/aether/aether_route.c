@@ -270,17 +270,23 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 	int hdr_len;
 	int ret;
 
-	if (!ctx || ctx->iface != iface || !dst || !data || 
+	if (!ctx || ctx->iface != iface || !dst || !data ||
 	    len > CONFIG_AETHER_MAX_PAYLOAD) {
 		return -EINVAL;
 	}
 
-	/* Find route to destination */
-	ret = aether_mesh_find_route(iface, dst, next_hop);
-	if (ret < 0) {
-		/* No route found - initiate route discovery */
-		LOG_DBG("No route to destination, sending RREQ");
-		return aether_mesh_send_rreq(iface, dst);
+	/* Check if destination is broadcast */
+	static const uint8_t broadcast_addr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	bool is_broadcast = (memcmp(dst, broadcast_addr, 6) == 0);
+
+	if (!is_broadcast) {
+		/* Unicast - find route to destination */
+		ret = aether_mesh_find_route(iface, dst, next_hop);
+		if (ret < 0) {
+			/* No route found - initiate route discovery */
+			LOG_DBG("No route to destination, sending RREQ");
+			return aether_mesh_send_rreq(iface, dst);
+		}
 	}
 
 	/* Build mesh header */
@@ -340,4 +346,100 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 	LOG_DBG("Mesh data sent to %02x:%02x:%02x:%02x:%02x:%02x, len=%zu",
 		dst[0], dst[1], dst[2], dst[3], dst[4], dst[5], len);
 	return 0;
+}
+
+/* Reliable mesh send with synchronous TX and retries */
+int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
+			      const uint8_t *data, size_t len, int max_retries)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	struct aether_mesh_hdr mesh_hdr;
+	/* Static buffers to reduce stack pressure - sends are serialized */
+	static uint8_t frame_buf[128];  /* Complete frame: HeyMac + Mesh + payload */
+	static uint8_t mesh_hdr_buf[32];
+	int mesh_hdr_len;
+	int frame_len;
+	int ret;
+
+	if (!ctx || ctx->iface != iface || !dst || !data ||
+	    len > CONFIG_AETHER_MAX_PAYLOAD) {
+		return -EINVAL;
+	}
+
+	/* Check if destination is broadcast */
+	static const uint8_t broadcast_addr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	bool is_broadcast = (memcmp(dst, broadcast_addr, 6) == 0);
+
+	if (!is_broadcast) {
+		/* For unicast, would need route lookup - for now just direct */
+		LOG_DBG("Reliable unicast not fully implemented, sending direct");
+	}
+
+	/* Build mesh header */
+	memset(&mesh_hdr, 0, sizeof(mesh_hdr));
+	mesh_hdr.type = AETHER_MSG_DATA;
+	mesh_hdr.ttl = CONFIG_AETHER_DEFAULT_TTL;
+	memcpy(mesh_hdr.src, ctx->local_addr, 6);
+	memcpy(mesh_hdr.dst, dst, 6);
+	mesh_hdr.seq_no = ctx->seq_no++;
+	mesh_hdr.qos_security = (AETHER_PRIORITY_NORMAL << 6) | (AETHER_DELIV_BESTEFFORT << 5);
+	mesh_hdr.length = len;
+
+	/* Optimize network ID */
+	uint16_t heymac_net_id = heymac_get_network_id(iface);
+	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != heymac_net_id) {
+		mesh_hdr.flags |= AETHER_FCTL_MESH_NET_ID;
+		mesh_hdr.mesh_net_id = ctx->mesh_net_id;
+	}
+
+	/* Build mesh header into buffer */
+	mesh_hdr_len = aether_mesh_build_header(&mesh_hdr, mesh_hdr_buf, sizeof(mesh_hdr_buf));
+	if (mesh_hdr_len < 0) {
+		LOG_ERR("Failed to build mesh header: %d", mesh_hdr_len);
+		return mesh_hdr_len;
+	}
+
+	/* Build simple HeyMac header (minimal for direct TX) */
+	struct heymac_context *heymac_ctx = net_if_l2_data(iface);
+	if (!heymac_ctx) {
+		return -EINVAL;
+	}
+
+	/* Frame format: [HeyMac header][Mesh header][Payload] */
+	frame_len = 0;
+
+	/* HeyMac header - simplified version for direct TX */
+	frame_buf[frame_len++] = HEYMAC_FRM_TYPE_DATA;  /* Version/Type */
+	frame_buf[frame_len++] = HEYMAC_FCTL_S | HEYMAC_FCTL_M | HEYMAC_FCTL_N;  /* Frame control */
+	frame_buf[frame_len++] = (heymac_ctx->net_id >> 8) & 0xFF;  /* Net ID high */
+	frame_buf[frame_len++] = heymac_ctx->net_id & 0xFF;  /* Net ID low */
+	/* Source address (short) */
+	frame_buf[frame_len++] = heymac_ctx->local_addr.short_addr[0];
+	frame_buf[frame_len++] = heymac_ctx->local_addr.short_addr[1];
+	frame_buf[frame_len++] = heymac_ctx->tx_seq_no++;  /* Sequence */
+
+	/* Append mesh header */
+	if (frame_len + mesh_hdr_len + len > sizeof(frame_buf)) {
+		LOG_ERR("Frame too large: %d", frame_len + mesh_hdr_len + (int)len);
+		return -ENOMEM;
+	}
+	memcpy(&frame_buf[frame_len], mesh_hdr_buf, mesh_hdr_len);
+	frame_len += mesh_hdr_len;
+
+	/* Append payload */
+	memcpy(&frame_buf[frame_len], data, len);
+	frame_len += len;
+
+	/* Send using synchronous TX with retries */
+	ret = aether_lora_send_sync(frame_buf, frame_len, max_retries);
+
+	if (ret == 0) {
+		LOG_DBG("Reliable send success to %02x:%02x, len=%zu",
+			dst[4], dst[5], len);
+	} else {
+		LOG_WRN("Reliable send failed to %02x:%02x: %d",
+			dst[4], dst[5], ret);
+	}
+
+	return ret;
 }

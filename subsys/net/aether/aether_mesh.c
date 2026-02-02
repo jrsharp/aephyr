@@ -41,9 +41,43 @@ static uint16_t aether_get_network_id_fallback(struct net_if *iface)
 /* Global mesh context - one per interface */
 struct aether_mesh_ctx *g_mesh_ctx;
 
-/* Work queue stack */
-#define MESH_WORKQ_STACK_SIZE 1024
+/* Work queue stack for mesh operations - needs room for send_hello() nested calls */
+#define MESH_WORKQ_STACK_SIZE 1536
 K_THREAD_STACK_DEFINE(mesh_workq_stack, MESH_WORKQ_STACK_SIZE);
+
+/* Duplicate detection - ring buffer of recently seen (source, seq_no) pairs */
+#define DEDUP_CACHE_SIZE 16
+struct dedup_entry {
+	uint8_t src[6];
+	uint8_t seq_no;
+	uint32_t timestamp;
+};
+static struct dedup_entry dedup_cache[DEDUP_CACHE_SIZE];
+static uint8_t dedup_idx;
+
+/* Check if packet is duplicate; returns true if duplicate, false if new */
+static bool is_duplicate(const uint8_t src[6], uint8_t seq_no)
+{
+	uint32_t now = k_uptime_get_32();
+
+	/* Check cache for matching entry (within 10 second window) */
+	for (int i = 0; i < DEDUP_CACHE_SIZE; i++) {
+		if (dedup_cache[i].timestamp != 0 &&
+		    (now - dedup_cache[i].timestamp) < 10000 &&
+		    dedup_cache[i].seq_no == seq_no &&
+		    memcmp(dedup_cache[i].src, src, 6) == 0) {
+			return true;  /* Duplicate */
+		}
+	}
+
+	/* Not found - add to cache */
+	memcpy(dedup_cache[dedup_idx].src, src, 6);
+	dedup_cache[dedup_idx].seq_no = seq_no;
+	dedup_cache[dedup_idx].timestamp = now;
+	dedup_idx = (dedup_idx + 1) % DEDUP_CACHE_SIZE;
+
+	return false;  /* New packet */
+}
 
 /* Forward declarations */
 static void aether_hello_work_handler(struct k_work *work);
@@ -214,17 +248,44 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 	return 0;
 }
 
-/* Hello message handling */
+/* Hello message handling with adaptive intervals */
 static void aether_hello_work_handler(struct k_work *work)
 {
 	struct k_work_delayable *dwork = k_work_delayable_from_work(work);
 	struct aether_mesh_ctx *ctx = CONTAINER_OF(dwork, struct aether_mesh_ctx, hello_work);
-	
+	uint32_t now = k_uptime_get_32();
+	int stable_neighbors = 0;
+
 	aether_mesh_send_hello(ctx->iface);
-	
-	/* Schedule next hello */
+
+	/* Count stable neighbors (active, seen recently, good signal) */
+	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
+		if (ctx->neighbors[i].active &&
+		    (now - ctx->neighbors[i].last_seen) < 60000 &&  /* Seen in last 60s */
+		    ctx->neighbors[i].rssi > -90) {  /* Reasonable signal */
+			stable_neighbors++;
+		}
+	}
+	k_mutex_unlock(&ctx->neighbor_lock);
+
+	/* Adaptive interval: longer if we have stable neighbors */
+	int32_t base_interval_ms;
+	if (stable_neighbors > 0) {
+		/* Have stable neighbors - use longer interval (60s) */
+		base_interval_ms = 60000;
+	} else {
+		/* No stable neighbors - discovery mode (30s) */
+		base_interval_ms = CONFIG_AETHER_HELLO_INTERVAL * 1000;
+	}
+
+	/* Add jitter to avoid collisions (±5 seconds) */
+	int32_t jitter = (sys_rand32_get() % 10000) - 5000;
+	int32_t interval_ms = base_interval_ms + jitter;
+
+	LOG_DBG("Next hello in %dms (stable_neighbors=%d)", interval_ms, stable_neighbors);
 	k_work_schedule_for_queue(&ctx->mesh_workq, &ctx->hello_work,
-				  K_SECONDS(CONFIG_AETHER_HELLO_INTERVAL));
+				  K_MSEC(interval_ms));
 }
 
 int aether_mesh_send_hello(struct net_if *iface)
@@ -429,10 +490,18 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 	}
 
 	/* Validate mesh network ID if present */
-	if ((hdr.flags & AETHER_FCTL_MESH_NET_ID) && 
+	if ((hdr.flags & AETHER_FCTL_MESH_NET_ID) &&
 	    hdr.mesh_net_id != ctx->mesh_net_id) {
 		LOG_DBG("Mesh network ID mismatch: got 0x%04x, expected 0x%04x",
 			hdr.mesh_net_id, ctx->mesh_net_id);
+		net_pkt_unref(pkt);
+		return;
+	}
+
+	/* Duplicate detection for data messages (skip for hello beacons) */
+	if (hdr.type != AETHER_MSG_HELLO && is_duplicate(hdr.src, hdr.seq_no)) {
+		LOG_DBG("Dropping duplicate packet from %02x:%02x, seq=%d",
+			hdr.src[4], hdr.src[5], hdr.seq_no);
 		net_pkt_unref(pkt);
 		return;
 	}

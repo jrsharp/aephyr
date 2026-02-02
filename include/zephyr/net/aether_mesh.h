@@ -307,6 +307,32 @@ static inline uint8_t aether_mesh_get_security(uint8_t qos_security)
 	return (qos_security >> 1) & 0x0F;
 }
 
+/**
+ * @brief Send data reliably with mesh-layer retries
+ *
+ * Blocks until message is sent successfully or all retries exhausted.
+ * Uses synchronous TX path with configurable retry count.
+ *
+ * @param iface Network interface
+ * @param dst Destination address (6 bytes, use ff:ff:ff:ff:ff:ff for broadcast)
+ * @param data Data to send
+ * @param len Data length
+ * @param max_retries Maximum number of TX attempts
+ * @return 0 on success, negative error code otherwise
+ */
+int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
+			      const uint8_t *data, size_t len, int max_retries);
+
+/**
+ * @brief Low-level synchronous LoRa send with retries (driver level)
+ *
+ * @param data Raw data to transmit
+ * @param len Data length
+ * @param max_retries Maximum retry attempts
+ * @return 0 on success, negative error code otherwise
+ */
+int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries);
+
 #ifdef __cplusplus
 }
 #endif

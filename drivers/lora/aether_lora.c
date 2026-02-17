@@ -394,10 +394,15 @@ static void aether_lora_iface_init(struct net_if *iface)
 	struct aether_lora_ctx *ctx = dev->data;
 
 	ctx->iface = iface;
-	
+
+	/* Prevent net_if_post_init() from calling net_if_up() automatically.
+	 * LoRa radio init (lora_config over SPI) can block for a long time
+	 * and must not hold up kernel boot. Caller brings up explicitly. */
+	net_if_flag_set(iface, NET_IF_NO_AUTO_START);
+
 	/* Initialize HeyMac interface */
 	heymac_iface_init(iface);
-	
+
 	LOG_DBG("Æther LoRa interface initialized");
 }
 

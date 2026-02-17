@@ -125,9 +125,17 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 
 		/* Transmit via LoRa.
 		 * Stop async RX, wait for radio to be ready, send, then restart RX.
-		 * Need substantial delay - radio may be mid-packet when we stop RX. */
-		lora_recv_async(ctx->lora_dev, NULL);
-		k_msleep(200);  /* Allow radio to fully exit RX mode */
+		 * Need substantial delay - radio may be mid-packet when we stop RX,
+		 * and stale DIO1 work handlers may still need to drain. */
+		ret = lora_recv_async(ctx->lora_dev, NULL);
+		if (ret == -EINVAL) {
+			/* Modem wasn't in RX (error handler released it).
+			 * Wait for any pending DIO1 work to drain. */
+			LOG_WRN("LoRa RX not active, waiting for modem");
+			k_msleep(300);
+		} else {
+			k_msleep(200);  /* Allow radio to fully exit RX mode */
+		}
 
 		/* Retry logic:
 		 * - EBUSY: modem busy, TX never started - retry immediately
@@ -191,8 +199,12 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 		}
 
 		/* Stop RX, wait for radio to settle */
-		lora_recv_async(ctx->lora_dev, NULL);
-		k_msleep(200);
+		ret = lora_recv_async(ctx->lora_dev, NULL);
+		if (ret == -EINVAL) {
+			k_msleep(300);
+		} else {
+			k_msleep(200);
+		}
 
 		/* Attempt transmission */
 		ret = lora_send(ctx->lora_dev, (uint8_t *)data, len);

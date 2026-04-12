@@ -63,7 +63,11 @@ extern "C" {
 /* Limits */
 #define AETHER_MAX_NODES   128
 #define AETHER_MAX_HOPS    15
-#define AETHER_MAX_PAYLOAD 64
+#ifndef CONFIG_AETHER_MAX_PAYLOAD
+#define AETHER_MAX_PAYLOAD 200
+#else
+#define AETHER_MAX_PAYLOAD CONFIG_AETHER_MAX_PAYLOAD
+#endif
 
 /* Æther mesh header structure */
 struct aether_mesh_hdr {
@@ -332,6 +336,33 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
  * @return 0 on success, negative error code otherwise
  */
 int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries);
+
+/**
+ * @brief Pause TX thread to keep radio in RX mode
+ *
+ * Called by 9P transport before waiting for a response. Prevents
+ * hello beacons from stealing the radio during critical RX windows.
+ */
+void aether_lora_tx_pause(void);
+
+/**
+ * @brief Resume TX thread after response received or timeout
+ */
+void aether_lora_tx_resume(void);
+
+/**
+ * @brief Run CAD diagnostic test
+ *
+ * Pauses TX, stops RX, runs count CAD checks, restarts RX, resumes TX.
+ * Results returned via out parameters.
+ *
+ * @param count Number of CAD checks to run
+ * @param out_clear Number of "channel clear" results (may be NULL)
+ * @param out_busy Number of "activity detected" results (may be NULL)
+ * @param out_err Number of errors/timeouts (may be NULL)
+ * @return 0 on success, negative if driver not running
+ */
+int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err);
 
 #ifdef __cplusplus
 }

@@ -128,10 +128,12 @@ config AETHER_CONDITIONAL_NET_ID
 
 config AETHER_MAX_PAYLOAD
 	int "Maximum payload size"
-	default 64
-	range 32 200
+	default 200
+	range 32 255
 	help
-	  Maximum payload size for mesh packets.
+	  Maximum payload size for mesh packets. SX1262 supports up to
+	  255 bytes per LoRa packet. Larger payloads reduce fragmentation
+	  overhead for 9P transport.
 
 config AETHER_SHELL
 	bool "Æther shell commands"
@@ -227,6 +229,32 @@ config AETHER_LORA_TX_POWER
 	range 0 22
 	help
 	  Default transmit power in dBm.
+
+config AETHER_LORA_CAD_ENABLED
+	bool "Enable CAD listen-before-talk"
+	default y
+	help
+	  Enable Channel Activity Detection (CAD) before each transmission.
+	  The SX1262 hardware detects LoRa preambles in ~16ms. If the channel
+	  is busy, the driver backs off and retries before transmitting.
+
+config AETHER_LORA_CAD_MAX_RETRIES
+	int "Maximum CAD retry attempts"
+	depends on AETHER_LORA_CAD_ENABLED
+	default 5
+	range 1 10
+	help
+	  Number of times to retry CAD if the channel is busy before
+	  transmitting anyway.
+
+config AETHER_LORA_CAD_BACKOFF_MAX_MS
+	int "Maximum CAD backoff (ms)"
+	depends on AETHER_LORA_CAD_ENABLED
+	default 100
+	range 20 500
+	help
+	  Maximum random backoff time in milliseconds when CAD detects
+	  channel activity.
 
 endif # AETHER_LORA
 

@@ -325,7 +325,7 @@ void heymac_recv(struct net_if *iface, struct net_pkt *pkt)
 
 	/* Validate network ID if present */
 	if ((hdr.frame_ctrl & HEYMAC_FCTL_N) && hdr.net_id != ctx->net_id) {
-		LOG_DBG("Network ID mismatch: got 0x%04x, expected 0x%04x",
+		LOG_INF("HeyMac net_id mismatch: got 0x%04x, expected 0x%04x",
 			hdr.net_id, ctx->net_id);
 		net_pkt_unref(pkt);
 		return;
@@ -336,7 +336,7 @@ void heymac_recv(struct net_if *iface, struct net_pkt *pkt)
 
 	ctx->rx_packets++;
 
-	LOG_DBG("Received HeyMac frame, type=%d, len=%zu",
+	LOG_INF("HeyMac RX: type=%d, len=%zu",
 		hdr.version_type & 0x0F, len - hdr_len);
 
 #ifdef CONFIG_AETHER_MESH

@@ -13,7 +13,9 @@ LOG_MODULE_REGISTER(aether_lora, CONFIG_AETHER_LORA_LOG_LEVEL);
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/heymac.h>
+#include <zephyr/sys/atomic.h>
 #include <zephyr/sys/ring_buffer.h>
+#include <zephyr/random/random.h>
 #include <string.h>
 
 /* Æther LoRa driver context */
@@ -52,6 +54,16 @@ static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
 /* Static context instance - forward declared for RX callback */
 static struct aether_lora_ctx aether_lora_ctx_0;
 
+/* TX pause flag: when set, TX thread defers beacon/queued sends.
+ * Used by 9P transport to keep radio in RX during response waits.
+ * Separate from ctx struct to avoid DRAM growth (struct is padded). */
+static atomic_t tx_paused;
+
+/* Shared TX staging buffer in DRAM — SPI DMA requires DRAM source.
+ * TX thread and send_sync are mutually exclusive (send_sync runs
+ * with TX paused), so a single buffer is safe. */
+static uint8_t tx_dram_buf[256];
+
 /* LoRa RX thread */
 static void aether_lora_rx_thread(void *p1, void *p2, void *p3)
 {
@@ -80,6 +92,35 @@ static void aether_lora_rx_thread(void *p1, void *p2, void *p3)
 	LOG_DBG("Æther LoRa RX thread stopped");
 }
 
+#ifdef CONFIG_AETHER_LORA_CAD_ENABLED
+/**
+ * CAD listen-before-talk check. Returns 0 when channel is clear or after
+ * max retries (transmit anyway). Negative on hard error.
+ */
+static int aether_lora_cad_check(struct aether_lora_ctx *ctx)
+{
+	bool activity;
+
+	for (int i = 0; i < CONFIG_AETHER_LORA_CAD_MAX_RETRIES; i++) {
+		int ret = lora_cad(ctx->lora_dev, &activity);
+		if (ret < 0) {
+			LOG_WRN("CAD failed (%d), proceeding with TX", ret);
+			return 0;
+		}
+		if (!activity) {
+			LOG_INF("CAD: channel clear (attempt %d)", i + 1);
+			return 0;
+		}
+		LOG_INF("CAD: activity detected, backoff %d/%d",
+			i + 1, CONFIG_AETHER_LORA_CAD_MAX_RETRIES);
+		k_msleep(sys_rand32_get() % CONFIG_AETHER_LORA_CAD_BACKOFF_MAX_MS);
+	}
+	LOG_WRN("CAD: channel busy after %d attempts, transmitting anyway",
+		CONFIG_AETHER_LORA_CAD_MAX_RETRIES);
+	return 0;
+}
+#endif /* CONFIG_AETHER_LORA_CAD_ENABLED */
+
 /* LoRa TX thread */
 static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 {
@@ -103,6 +144,12 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 
+		/* If TX is paused (9P transport waiting for response),
+		 * hold off sending to keep the radio in RX mode. */
+		while (atomic_get(&tx_paused)) {
+			k_msleep(50);
+		}
+
 		/* Get total packet length */
 		len = net_pkt_get_len(pkt);
 
@@ -112,16 +159,15 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 			continue;
 		}
 
-		/* Linearize packet data - may span multiple fragments.
-		 * Static buffer to reduce stack pressure (thread is single-use). */
-		static uint8_t tx_buf[256];
+		/* Linearize packet data into DRAM staging buffer.
+		 * SPI DMA requires a DRAM source address. */
 		net_pkt_cursor_init(pkt);  /* Reset cursor to start */
-		if (net_pkt_read(pkt, tx_buf, len) < 0) {
+		if (net_pkt_read(pkt, tx_dram_buf, len) < 0) {
 			LOG_ERR("Failed to read packet data");
 			net_pkt_unref(pkt);
 			continue;
 		}
-		data = tx_buf;
+		data = tx_dram_buf;
 
 		/* Transmit via LoRa.
 		 * Stop async RX, wait for radio to be ready, send, then restart RX.
@@ -137,6 +183,10 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 			k_msleep(200);  /* Allow radio to fully exit RX mode */
 		}
 
+#ifdef CONFIG_AETHER_LORA_CAD_ENABLED
+		aether_lora_cad_check(ctx);
+#endif
+
 		/* Retry logic:
 		 * - EBUSY: modem busy, TX never started - retry immediately
 		 * - EAGAIN: timeout, TX state unknown - wait then retry once
@@ -149,11 +199,17 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 			/* Modem busy - wait and retry */
 			LOG_WRN("LoRa modem busy, retrying...");
 			k_msleep(100);
-			ret = lora_send(ctx->lora_dev, data, len);
-			if (ret == 0) {
-				LOG_DBG("LoRa packet transmitted (retry), len=%zu", len);
+			/* Abort retry if TX was paused during sleep —
+			 * send_sync may have claimed tx_dram_buf. */
+			if (atomic_get(&tx_paused)) {
+				LOG_DBG("TX paused during retry, aborting");
 			} else {
-				LOG_ERR("LoRa TX failed after retry: %d", ret);
+				ret = lora_send(ctx->lora_dev, data, len);
+				if (ret == 0) {
+					LOG_DBG("LoRa packet transmitted (retry), len=%zu", len);
+				} else {
+					LOG_ERR("LoRa TX failed after retry: %d", ret);
+				}
 			}
 		} else {
 			/* EAGAIN timeout - TX state unknown.
@@ -162,11 +218,17 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 			 * RX-side dedup filters duplicates if first TX succeeded. */
 			LOG_WRN("LoRa TX timeout (%d), wait+retry", ret);
 			k_msleep(1000);  /* Wait for potential in-flight TX */
-			ret = lora_send(ctx->lora_dev, data, len);
-			if (ret == 0) {
-				LOG_DBG("LoRa packet transmitted (after timeout), len=%zu", len);
+			/* Abort retry if TX was paused during sleep —
+			 * send_sync may have claimed tx_dram_buf. */
+			if (atomic_get(&tx_paused)) {
+				LOG_DBG("TX paused during retry, aborting");
 			} else {
-				LOG_WRN("LoRa retry also failed: %d (first TX may have succeeded)", ret);
+				ret = lora_send(ctx->lora_dev, data, len);
+				if (ret == 0) {
+					LOG_DBG("LoRa packet transmitted (after timeout), len=%zu", len);
+				} else {
+					LOG_WRN("LoRa retry also failed: %d (first TX may have succeeded)", ret);
+				}
 			}
 		}
 
@@ -206,8 +268,14 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 			k_msleep(200);
 		}
 
-		/* Attempt transmission */
-		ret = lora_send(ctx->lora_dev, (uint8_t *)data, len);
+#ifdef CONFIG_AETHER_LORA_CAD_ENABLED
+		aether_lora_cad_check(ctx);
+#endif
+
+		/* Copy to DRAM staging buffer — SPI DMA requires DRAM source.
+		 * Callers (mesh send_reliable) may pass PSRAM pointers. */
+		memcpy(tx_dram_buf, data, len);
+		ret = lora_send(ctx->lora_dev, tx_dram_buf, len);
 
 		/* Restart RX */
 		k_msleep(50);
@@ -227,6 +295,59 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 
 	LOG_ERR("Sync TX failed after %d attempts: %d", max_retries, ret);
 	return ret;
+}
+
+int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err)
+{
+	struct aether_lora_ctx *ctx = &aether_lora_ctx_0;
+	int clear = 0, busy = 0, errors = 0;
+	bool activity;
+	int ret;
+
+	if (!ctx->running) {
+		return -ENETDOWN;
+	}
+
+	/* Pause TX thread and stop RX so we own the modem */
+	atomic_set(&tx_paused, 1);
+	k_msleep(100);  /* Let TX thread finish if mid-send */
+	lora_recv_async(ctx->lora_dev, NULL);
+	k_msleep(200);
+
+	for (int i = 0; i < count; i++) {
+		ret = lora_cad(ctx->lora_dev, &activity);
+		if (ret < 0) {
+			errors++;
+		} else if (activity) {
+			busy++;
+		} else {
+			clear++;
+		}
+		k_msleep(50);  /* Brief gap between checks */
+	}
+
+	/* Restart RX, resume TX */
+	k_msleep(50);
+	lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+	atomic_clear(&tx_paused);
+
+	if (out_clear) *out_clear = clear;
+	if (out_busy) *out_busy = busy;
+	if (out_err) *out_err = errors;
+
+	return 0;
+}
+
+void aether_lora_tx_pause(void)
+{
+	atomic_set(&tx_paused, 1);
+	LOG_DBG("TX paused");
+}
+
+void aether_lora_tx_resume(void)
+{
+	atomic_clear(&tx_paused);
+	LOG_DBG("TX resumed");
 }
 
 /* LoRa RX callback - note: dev is the LoRa radio, not our net device */
@@ -285,7 +406,7 @@ static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
 	}
 
 	heymac_ctx->rx_packets++;
-	LOG_DBG("LoRa packet received, len=%d, rssi=%d, snr=%d", size, rssi, snr);
+	LOG_INF("LoRa RX: len=%d, rssi=%d, snr=%d", size, rssi, snr);
 }
 
 /* HeyMac radio API implementation */
@@ -481,7 +602,7 @@ static int aether_lora_init(const struct device *dev)
 	ctx->modem_config.frequency = 915000000;  /* 915 MHz */
 	ctx->modem_config.bandwidth = BW_125_KHZ;
 	ctx->modem_config.datarate = SF_10;  /* Use SF10 as it works reliably */
-	ctx->modem_config.preamble_len = 8;
+	ctx->modem_config.preamble_len = 16;  /* 16 symbols for half-duplex turnaround margin */
 	ctx->modem_config.coding_rate = CR_4_5;
 	ctx->modem_config.tx_power = CONFIG_AETHER_LORA_TX_POWER;
 	ctx->modem_config.tx = true;  /* Enable TX */

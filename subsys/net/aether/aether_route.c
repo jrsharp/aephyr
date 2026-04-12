@@ -28,6 +28,16 @@ static inline uint16_t aether_route_get_network_id_fallback(struct net_if *iface
 /* External reference to global mesh context */
 extern struct aether_mesh_ctx *g_mesh_ctx;
 
+/* Static buffers for reliable send - moved to file scope for PSRAM placement.
+ * Sends are serialized so a single buffer is safe.
+ * Frame = HeyMac hdr (~7) + Mesh hdr (~20) + payload (up to MAX_PAYLOAD). */
+#ifdef CONFIG_ESP_SPIRAM
+static uint8_t frame_buf[CONFIG_AETHER_MAX_PAYLOAD + 32]
+	__attribute__((section(".ext_ram.bss")));
+#else
+static uint8_t frame_buf[CONFIG_AETHER_MAX_PAYLOAD + 32];
+#endif
+
 /* Route discovery and management functions */
 
 int aether_mesh_find_route(struct net_if *iface, const uint8_t dst[6], 
@@ -354,8 +364,6 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
 	struct aether_mesh_hdr mesh_hdr;
-	/* Static buffers to reduce stack pressure - sends are serialized */
-	static uint8_t frame_buf[128];  /* Complete frame: HeyMac + Mesh + payload */
 	static uint8_t mesh_hdr_buf[32];
 	int mesh_hdr_len;
 	int frame_len;

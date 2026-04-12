@@ -279,11 +279,24 @@ static void aether_hello_work_handler(struct k_work *work)
 		base_interval_ms = CONFIG_AETHER_HELLO_INTERVAL * 1000;
 	}
 
-	/* Add jitter to avoid collisions (±5 seconds) */
-	int32_t jitter = (sys_rand32_get() % 10000) - 5000;
-	int32_t interval_ms = base_interval_ms + jitter;
+	/* Staggered beacon scheduling: deterministic slot offset from MAC address
+	 * (FNV-1a hash) spreads nodes across the interval, plus small random
+	 * jitter to handle hash collisions. */
+	uint32_t hash = 2166136261u;
+	for (int i = 0; i < 6; i++) {
+		hash ^= ctx->local_addr[i];
+		hash *= 16777619u;
+	}
+	int32_t slot_range = base_interval_ms / 4;  /* ±25% of interval */
+	int32_t slot_offset = (int32_t)(hash % (2 * slot_range)) - slot_range;
+	int32_t jitter = (int32_t)(sys_rand32_get() % 2000) - 1000;  /* ±1s fine jitter */
+	int32_t interval_ms = base_interval_ms + slot_offset + jitter;
+	if (interval_ms < 5000) {
+		interval_ms = 5000;
+	}
 
-	LOG_DBG("Next hello in %dms (stable_neighbors=%d)", interval_ms, stable_neighbors);
+	LOG_DBG("Next hello in %dms (stable_neighbors=%d, slot_offset=%d)",
+		interval_ms, stable_neighbors, slot_offset);
 	k_work_schedule_for_queue(&ctx->mesh_workq, &ctx->hello_work,
 				  K_MSEC(interval_ms));
 }
@@ -500,8 +513,9 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 
 	/* Duplicate detection for data messages (skip for hello beacons) */
 	if (hdr.type != AETHER_MSG_HELLO && is_duplicate(hdr.src, hdr.seq_no)) {
-		LOG_DBG("Dropping duplicate packet from %02x:%02x, seq=%d",
-			hdr.src[4], hdr.src[5], hdr.seq_no);
+		LOG_INF("Dropping duplicate from %02x:%02x:%02x:%02x:%02x:%02x seq=%d",
+			hdr.src[0], hdr.src[1], hdr.src[2],
+			hdr.src[3], hdr.src[4], hdr.src[5], hdr.seq_no);
 		net_pkt_unref(pkt);
 		return;
 	}
@@ -551,6 +565,16 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		break;
 
 	case AETHER_MSG_DATA:
+		LOG_INF("mesh DATA from %02x:%02x:%02x:%02x:%02x:%02x "
+			"to %02x:%02x:%02x:%02x:%02x:%02x "
+			"(local=%02x:%02x:%02x:%02x:%02x:%02x)",
+			hdr.src[0], hdr.src[1], hdr.src[2],
+			hdr.src[3], hdr.src[4], hdr.src[5],
+			hdr.dst[0], hdr.dst[1], hdr.dst[2],
+			hdr.dst[3], hdr.dst[4], hdr.dst[5],
+			ctx->local_addr[0], ctx->local_addr[1],
+			ctx->local_addr[2], ctx->local_addr[3],
+			ctx->local_addr[4], ctx->local_addr[5]);
 		/* Check if packet is for us */
 		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0 ||
 		    memcmp(hdr.dst, "\xff\xff\xff\xff\xff\xff", 6) == 0) {

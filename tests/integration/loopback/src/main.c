@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Æther Authors
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * Integration tests for Aether stack - tests actual module header functions
  * and validates the expected wire format for interoperability.

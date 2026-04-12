@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 # Æther mesh specific configuration options are in the main Kconfig file
 # This file exists for module structure consistency

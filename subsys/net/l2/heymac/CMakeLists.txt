@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 zephyr_sources_ifdef(CONFIG_NET_L2_HEYMAC
     heymac.c

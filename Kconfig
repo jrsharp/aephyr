@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 config NET_L2_CUSTOM
 	bool "Enable custom Layer 2 protocol support"

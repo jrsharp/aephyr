@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Æther Authors
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * Unit tests for Aether mesh header parsing and building.
  * Self-contained tests without full stack dependencies.

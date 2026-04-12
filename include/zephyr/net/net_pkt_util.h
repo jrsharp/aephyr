@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Æther Authors
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  */
 
 #ifndef ZEPHYR_INCLUDE_NET_NET_PKT_UTIL_H_

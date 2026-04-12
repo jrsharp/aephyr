@@ -94,7 +94,7 @@ manifest:
 ### 3. Module Kconfig (`Kconfig`)
 
 ```kconfig
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 if NET_L2_CUSTOM
 
@@ -241,7 +241,7 @@ endif # NET_L2_CUSTOM
 ### 4. Module CMakeLists.txt
 
 ```cmake
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 if(CONFIG_NET_L2_HEYMAC OR CONFIG_AETHER_MESH OR CONFIG_AETHER_LORA)
   zephyr_include_directories(include)
@@ -256,7 +256,7 @@ endif()
 ### 5. Device Tree Binding (`dts/bindings/net/aether-mesh-net.yaml`)
 
 ```yaml
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 description: Æther Mesh Network Configuration
 

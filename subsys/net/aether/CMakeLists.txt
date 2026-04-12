@@ -1,4 +1,4 @@
-# SPDX-License-Identifier: Apache-2.0
+# SPDX-License-Identifier: MIT
 
 zephyr_sources(aether_mesh.c)
 zephyr_sources(aether_route.c)

@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Æther Authors
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * Unit tests for HeyMac header parsing and building.
  * These are self-contained tests that implement the parsing logic

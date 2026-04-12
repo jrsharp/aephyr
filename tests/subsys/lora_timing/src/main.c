@@ -1,7 +1,7 @@
 /*
  * Copyright (c) 2025 Æther Authors
  *
- * SPDX-License-Identifier: Apache-2.0
+ * SPDX-License-Identifier: MIT
  *
  * LoRa timing tests - validates time-on-air calculations, duty cycle
  * tracking, and collision avoidance logic against SX126x datasheet values.

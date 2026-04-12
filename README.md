@@ -287,7 +287,7 @@ Thanks to Dean for creating an elegant, LoRa-optimized MAC protocol and making i
 
 ## License
 
-SPDX-License-Identifier: Apache-2.0
+SPDX-License-Identifier: MIT
 
 ## Contributing
 

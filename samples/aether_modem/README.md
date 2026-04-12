@@ -221,4 +221,4 @@ Built-in clients for BBS, chat, and other Æther services.
 
 ## License
 
-SPDX-License-Identifier: Apache-2.0
+SPDX-License-Identifier: MIT

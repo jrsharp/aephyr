@@ -34,6 +34,11 @@ LOG_MODULE_REGISTER(aether_dect, CONFIG_AETHER_DECT_LOG_LEVEL);
 
 #include "dect_phy.h"
 
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+#include <zephyr/net/aether_mesh.h>
+extern struct aether_mesh_ctx *g_mesh_ctx;
+#endif
+
 /* Æther DECT driver context. */
 struct aether_dect_ctx {
 	struct net_if *iface;
@@ -81,7 +86,7 @@ static uint8_t tx_frame_buf[256];
 /* Transmit one already-linearized frame with LBT and bounded busy-retry.
  * Returns 0 on success, negative errno otherwise. Takes radio_lock. */
 static int aether_dect_radio_tx(struct aether_dect_ctx *ctx, const uint8_t *data, size_t len,
-				int max_retries)
+				uint16_t receiver_id, int max_retries)
 {
 	int ret = -EBUSY;
 
@@ -92,7 +97,7 @@ static int aether_dect_radio_tx(struct aether_dect_ctx *ctx, const uint8_t *data
 		}
 
 		k_mutex_lock(&ctx->radio_lock, K_FOREVER);
-		ret = dect_phy_tx(data, len);
+		ret = dect_phy_tx(receiver_id, data, len);
 		k_mutex_unlock(&ctx->radio_lock);
 
 		if (ret == 0) {
@@ -167,7 +172,17 @@ static void aether_dect_radio_thread(void *p1, void *p2, void *p3)
 				continue;
 			}
 
-			ret = aether_dect_radio_tx(ctx, tx_frame_buf, len,
+			/* A 2-byte link-layer destination (set by the mesh layer for
+			 * HONR unicast hops) becomes the PHY receiver id; otherwise
+			 * the frame is broadcast. */
+			uint16_t rx_id = DECT_PHY_BROADCAST_ID;
+			struct net_linkaddr *ll = net_pkt_lladdr_dst(pkt);
+
+			if (ll->len >= 2) {
+				rx_id = (uint16_t)((ll->addr[0] << 8) | ll->addr[1]);
+			}
+
+			ret = aether_dect_radio_tx(ctx, tx_frame_buf, len, rx_id,
 						   CONFIG_AETHER_DECT_CAD_MAX_RETRIES);
 			if (ret == 0) {
 				LOG_DBG("DECT TX ok, len=%zu", len);
@@ -181,6 +196,15 @@ static void aether_dect_radio_thread(void *p1, void *p2, void *p3)
 		}
 
 		/* Nothing to send: listen for a bounded window. */
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+		/* Track the HONR identity so the modem hardware-filters to it
+		 * (0 while unjoined keeps RX promiscuous for the tree join).
+		 */
+		if (g_mesh_ctx) {
+			dect_phy_set_node_id(g_mesh_ctx->honr_joined ?
+					     g_mesh_ctx->honr_addr : 0);
+		}
+#endif
 		k_mutex_lock(&ctx->radio_lock, K_FOREVER);
 		dect_phy_rx_window(CONFIG_AETHER_DECT_RX_WINDOW_MS);
 		k_mutex_unlock(&ctx->radio_lock);
@@ -200,7 +224,7 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 		return -EINVAL;
 	}
 
-	return aether_dect_radio_tx(ctx, data, len, max_retries);
+	return aether_dect_radio_tx(ctx, data, len, DECT_PHY_BROADCAST_ID, max_retries);
 }
 
 int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err)

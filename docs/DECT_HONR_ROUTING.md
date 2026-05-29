@@ -123,13 +123,14 @@ This is the LoRa-impossible win: LoRa has no PHY-level addressing, so it must
 receive everything and filter in software. It also mirrors DECT's native FT/PT
 (parent/child) structure.
 
-**One detail to confirm during implementation:** the RX-side
-`receiver_identity` filter is documented and confirmed, but we must verify which
-PHY control-header format (type 1 vs type 2) carries the *receiver identity*
-field on TX, and use that header for unicast hops (the current
-`phy_ctrl_field_common` is type 1 and carries the transmitter ID). The setter
-hooks (`dect_phy_set_node_id`, per-frame receiver id) are small additions to
-`dect_phy.c` / `aether_dect.c`.
+**Resolved (step 4):** the **Type 2** PHY control header carries the receiver
+identity (`receiver_id_hi/lo`) alongside the transmitter ID; `tx_params.phy_type`
+selects it (0 = Type 1 broadcast, 1 = Type 2 addressed). In HONR mode the driver
+builds Type 2 frames, with the receiver id set to the next hop (unicast) or the
+broadcast id (`0xFFFF`), and arms the RX filter to the node's HONR address. The
+per-hop next hop is conveyed from the mesh layer to the driver via
+`net_pkt_lladdr_dst` (2 bytes), which is stored by value in the packet and so
+survives the transmit queue.
 
 ## Trade-offs
 
@@ -157,7 +158,11 @@ hooks (`dect_phy_set_node_id`, per-frame receiver id) are small additions to
    Root is `CONFIG_AETHER_HONR_ROOT` (address 0x0000). Implemented in
    `aether_honr.c`; `aether info` shows the assigned HONR address and join state.
    (Single mesh instance; no slot/clock sync yet.)
-4. DECT identity hookup: `transmitter_id`/`receiver_identity` from the HONR
-   address + RX hardware filter; confirm the unicast PHY header format.
+4. (done) DECT identity hookup: addressed Type 2 PHY header with the HONR
+   address as transmitter id and the next hop as receiver id; RX hardware filter
+   armed to the node's HONR address (0/promiscuous while unjoined or root). Next
+   hop conveyed mesh→driver via `net_pkt_lladdr_dst`. Builds in both modes.
+   Hardware-untested.
 5. Bring-up on three nodes: root + two children, verify up/down delivery and
-   hardware-filtered hops via `aether status` / `dect stats`.
+   hardware-filtered hops via `aether status` / `dect stats`. (Needs the DECT
+   NR+ PHY modem firmware and boards.)

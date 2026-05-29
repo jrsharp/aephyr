@@ -44,8 +44,23 @@ typedef void (*dect_phy_rx_cb_t)(const uint8_t *data, size_t len, int16_t rssi_d
  */
 int dect_phy_init(uint16_t *device_id);
 
+/** DECT NR+ broadcast receiver identity (accepted by every RX filter). */
+#define DECT_PHY_BROADCAST_ID 0xFFFFU
+
 /** @brief Register the receive callback (NULL to disable). */
 void dect_phy_set_rx_cb(dect_phy_rx_cb_t cb);
+
+/**
+ * @brief Set this node's 16-bit PHY identity.
+ *
+ * Once set, the identity is used as the transmitter ID and as the RX hardware
+ * filter (the modem accepts only frames whose receiver identity matches this
+ * value or the broadcast ID), and transmissions use the addressed Type 2 PHY
+ * header. If never set, transmissions use the broadcast Type 1 header and the
+ * RX filter is disabled (promiscuous). An identity of 0 (the HONR root) also
+ * leaves the RX filter disabled.
+ */
+void dect_phy_set_node_id(uint16_t node_id);
 
 /** @brief Set the carrier (channel) used by subsequent operations. */
 void dect_phy_set_carrier(uint16_t carrier);
@@ -56,13 +71,16 @@ void dect_phy_set_tx_power(int8_t power);
 /**
  * @brief Transmit one frame with listen-before-talk, blocking until complete.
  *
- * @param data Payload to send.
- * @param len  Payload length in bytes.
+ * @param receiver_id Destination PHY identity for the addressed Type 2 header,
+ *                    or DECT_PHY_BROADCAST_ID for broadcast. Ignored (broadcast
+ *                    Type 1 header) when no node identity has been set.
+ * @param data        Payload to send.
+ * @param len         Payload length in bytes.
  * @retval 0       on success.
  * @retval -EBUSY  LBT found the channel busy (transmission was not sent).
  * @retval <0      other modem error.
  */
-int dect_phy_tx(const uint8_t *data, size_t len);
+int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len);
 
 /**
  * @brief Open a continuous receive window, blocking until it elapses.

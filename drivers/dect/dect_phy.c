@@ -16,6 +16,7 @@
 #include <zephyr/drivers/hwinfo.h>
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
+#include <string.h>
 
 LOG_MODULE_REGISTER(dect_phy, CONFIG_AETHER_DECT_LOG_LEVEL);
 
@@ -52,6 +53,12 @@ static dect_phy_rx_cb_t rx_cb;
 /* Runtime-tunable radio settings (defaults from Kconfig). */
 static uint16_t cfg_carrier = CONFIG_AETHER_DECT_CARRIER;
 static int8_t cfg_tx_power = CONFIG_AETHER_DECT_TX_POWER;
+
+/* This node's 16-bit PHY identity. When set, it drives the transmitter ID, the
+ * RX hardware filter, and selection of the addressed Type 2 PHY header.
+ */
+static uint16_t node_id;
+static bool node_id_set;
 
 /* Result captured from the most recent operation-complete event, and the peak
  * RSSI captured from the most recent RSSI measurement. The radio is serialized
@@ -206,6 +213,18 @@ void dect_phy_set_tx_power(int8_t power)
 	cfg_tx_power = power;
 }
 
+void dect_phy_set_node_id(uint16_t id)
+{
+	node_id = id;
+	node_id_set = true;
+}
+
+/* Transmitter ID to advertise: the node identity once set, else the hardware ID. */
+static uint16_t tx_id(void)
+{
+	return node_id_set ? node_id : phy_device_id;
+}
+
 int dect_phy_init(uint16_t *device_id)
 {
 	int err;
@@ -261,27 +280,45 @@ int dect_phy_init(uint16_t *device_id)
 	return 0;
 }
 
-int dect_phy_tx(const uint8_t *data, size_t len)
+int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 {
+	union nrf_modem_dect_phy_hdr phdr;
 	int err;
 
-	struct phy_ctrl_field_common header = {
-		.header_format = 0x0,
-		.packet_length_type = 0x0,
-		.packet_length = CONFIG_AETHER_DECT_PACKET_LENGTH,
-		.short_network_id = (CONFIG_AETHER_DECT_NETWORK_ID & 0xff),
-		.transmitter_id_hi = (phy_device_id >> 8),
-		.transmitter_id_lo = (phy_device_id & 0xff),
-		.transmit_power = cfg_tx_power,
-		.reserved = 0,
-		.df_mcs = CONFIG_AETHER_DECT_MCS,
-	};
+	memset(&phdr, 0, sizeof(phdr));
+
+	if (node_id_set) {
+		/* Addressed Type 2 header: lets receivers filter in hardware. */
+		phdr.hdr_type_2.packet_length = CONFIG_AETHER_DECT_PACKET_LENGTH;
+		phdr.hdr_type_2.packet_length_type = 0;
+		phdr.hdr_type_2.header_format = 0;
+		phdr.hdr_type_2.short_network_id = (CONFIG_AETHER_DECT_NETWORK_ID & 0xff);
+		phdr.hdr_type_2.transmitter_id_hi = (tx_id() >> 8);
+		phdr.hdr_type_2.transmitter_id_lo = (tx_id() & 0xff);
+		phdr.hdr_type_2.df_mcs = CONFIG_AETHER_DECT_MCS;
+		phdr.hdr_type_2.transmit_power = cfg_tx_power;
+		phdr.hdr_type_2.receiver_id_hi = (receiver_id >> 8);
+		phdr.hdr_type_2.receiver_id_lo = (receiver_id & 0xff);
+		phdr.hdr_type_2.df_new_data_indication = 1;
+	} else {
+		/* Broadcast Type 1 header (no receiver identity). */
+		struct phy_ctrl_field_common *h1 = (struct phy_ctrl_field_common *)&phdr;
+
+		h1->header_format = 0x0;
+		h1->packet_length_type = 0x0;
+		h1->packet_length = CONFIG_AETHER_DECT_PACKET_LENGTH;
+		h1->short_network_id = (CONFIG_AETHER_DECT_NETWORK_ID & 0xff);
+		h1->transmitter_id_hi = (tx_id() >> 8);
+		h1->transmitter_id_lo = (tx_id() & 0xff);
+		h1->transmit_power = cfg_tx_power;
+		h1->df_mcs = CONFIG_AETHER_DECT_MCS;
+	}
 
 	struct nrf_modem_dect_phy_tx_params tx = {
 		.start_time = 0,
 		.handle = DECT_PHY_TX_HANDLE,
 		.network_id = CONFIG_AETHER_DECT_NETWORK_ID,
-		.phy_type = 0,
+		.phy_type = node_id_set ? 1 : 0, /* 0 = Type 1, 1 = Type 2 */
 #ifdef CONFIG_AETHER_DECT_LBT_ENABLED
 		.lbt_rssi_threshold_max = CONFIG_AETHER_DECT_LBT_THRESHOLD_DBM,
 		.lbt_period = NRF_MODEM_DECT_LBT_PERIOD_MAX,
@@ -290,7 +327,7 @@ int dect_phy_tx(const uint8_t *data, size_t len)
 		.lbt_period = 0,
 #endif
 		.carrier = cfg_carrier,
-		.phy_header = (union nrf_modem_dect_phy_hdr *)&header,
+		.phy_header = &phdr,
 		.data = (void *)data,
 		.data_size = len,
 	};
@@ -337,7 +374,10 @@ int dect_phy_rx_window(uint32_t duration_ms)
 			    NRF_MODEM_DECT_MODEM_TIME_TICK_RATE_KHZ,
 		.filter.short_network_id = CONFIG_AETHER_DECT_NETWORK_ID & 0xff,
 		.filter.is_short_network_id_used = 1,
-		.filter.receiver_identity = 0,
+		/* Hardware-filter to this node's identity once set (0 = root /
+		 * unset = promiscuous). Broadcast frames match regardless.
+		 */
+		.filter.receiver_identity = node_id_set ? node_id : 0,
 	};
 
 	err = nrf_modem_dect_phy_rx(&rx);

@@ -630,6 +630,18 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			if (pkt->buffer && pkt->buffer->data) {
 				pkt->buffer->data[2] = hdr.ttl;
 			}
+			/* Address the next hop so the radio hardware-filters it. */
+			{
+				uint8_t nh[6];
+
+				if (aether_honr_next_hop(iface, hdr.dst, nh) == 0) {
+					struct net_linkaddr *ll = net_pkt_lladdr_dst(pkt);
+
+					ll->len = 2;
+					ll->addr[0] = nh[4];
+					ll->addr[1] = nh[5];
+				}
+			}
 			net_if_queue_tx(iface, pkt);
 			ctx->packets_forwarded++;
 			LOG_DBG("HONR forwarded toward %02x:%02x", hdr.dst[4], hdr.dst[5]);

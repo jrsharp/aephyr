@@ -357,6 +357,22 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 		return ret;
 	}
 
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+	/* Tag the link-layer destination with the HONR next hop so the radio
+	 * addresses (and the modem hardware-filters) the frame. */
+	if (!is_broadcast) {
+		uint8_t nh[6];
+
+		if (aether_honr_next_hop(iface, dst, nh) == 0) {
+			struct net_linkaddr *ll = net_pkt_lladdr_dst(pkt);
+
+			ll->len = 2;
+			ll->addr[0] = nh[4];
+			ll->addr[1] = nh[5];
+		}
+	}
+#endif
+
 	/* Send packet */
 	net_if_queue_tx(iface, pkt);
 	/* net_if_queue_tx takes ownership of the packet */

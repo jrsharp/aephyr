@@ -13,10 +13,11 @@ if NET_L2_CUSTOM
 config NET_L2_HEYMAC
 	bool "HeyMac Layer 2 protocol support"
 	depends on NET_L2_CUSTOM
-	depends on LORA
 	help
-	  Enable HeyMac Layer 2 protocol for LoRa mesh networking.
-	  HeyMac provides the MAC layer for Æther mesh networks.
+	  Enable HeyMac Layer 2 protocol for mesh networking.
+	  HeyMac provides the MAC layer for Æther mesh networks. It is
+	  radio-agnostic; the concrete radio is provided by a driver
+	  integration (AETHER_LORA for SX126x, AETHER_DECT for DECT NR+).
 
 if NET_L2_HEYMAC
 
@@ -257,5 +258,139 @@ config AETHER_LORA_CAD_BACKOFF_MAX_MS
 	  channel activity.
 
 endif # AETHER_LORA
+
+config AETHER_DECT
+	bool "Æther DECT NR+ driver integration"
+	depends on NET_L2_HEYMAC
+	depends on NRF_MODEM_LIB
+	help
+	  DECT NR+ PHY driver integration for Æther mesh networking on the
+	  nRF91 Series (nRF9151/nRF9161, e.g. nRF9151 DK, Thingy:91 X).
+	  Provides a HeyMac radio backed by the DECT NR+ physical layer with
+	  listen-before-talk channel access. Requires the DECT NR+ PHY modem
+	  firmware. Mutually exclusive with AETHER_LORA.
+
+if AETHER_DECT
+
+config AETHER_DECT_LOG_LEVEL
+	int "Æther DECT log level"
+	depends on LOG
+	default 3
+	range 0 4
+
+config AETHER_DECT_CARRIER
+	int "DECT NR+ carrier (channel) number"
+	default 0
+	help
+	  Absolute channel frequency number. Availability and the rules for
+	  using a channel vary by country and region (see ETSI TS 103 636-2
+	  section 5.4.2). A value of 0 fails the build on purpose: set the
+	  carrier deliberately for your region (1677 is a common EU value,
+	  1711 a common US value).
+
+config AETHER_DECT_NETWORK_ID
+	int "DECT NR+ network ID"
+	range 1 4294967295
+	default 91
+	help
+	  PHY-layer network identifier shared by all nodes. Distinct from the
+	  logical HeyMac/Æther network ID carried in the frame.
+
+config AETHER_DECT_MCS
+	int "Modulation and coding scheme (MCS) index"
+	range 0 4
+	default 1
+	help
+	  Higher MCS carries more bytes per subslot at the cost of range.
+
+config AETHER_DECT_PACKET_LENGTH
+	int "PHY packet length in subslots"
+	range 1 16
+	default 2
+	help
+	  Number of subslots reserved per transmitted frame. Must be large
+	  enough to carry the payload at the configured MCS.
+	  TODO: derive this from the frame length using the DECT transport
+	  block size tables instead of a fixed value. Small frames (beacons,
+	  hellos) fit the default; large data/9P frames need a larger value.
+
+config AETHER_DECT_TX_POWER
+	int "Transmit power index"
+	range 0 13
+	default 11
+	help
+	  DECT NR+ transmit power setting (see ETSI TS 103 636-4 table
+	  6.2.1-3). Lower values reduce interference between bench nodes.
+
+config AETHER_DECT_RX_WINDOW_MS
+	int "Receive window duration in milliseconds"
+	range 10 2000
+	default 200
+	help
+	  Duration of each continuous receive window between transmit bursts.
+	  Bounds worst-case transmit latency in the windowed-RX model.
+
+config AETHER_DECT_LBT_ENABLED
+	bool "Listen-before-talk (CSMA) on transmit"
+	default y
+	help
+	  Perform energy-based listen-before-talk inside each transmit
+	  operation. If the channel is busy the transmission is not sent and
+	  the driver backs off and retries (CSMA).
+
+config AETHER_DECT_LBT_THRESHOLD_DBM
+	int "Listen-before-talk RSSI threshold in dBm"
+	depends on AETHER_DECT_LBT_ENABLED
+	range -140 -1
+	default -70
+	help
+	  Channel is considered busy when measured RSSI exceeds this level.
+
+config AETHER_DECT_CAD_MAX_RETRIES
+	int "Maximum channel-busy retry attempts"
+	default 5
+	range 1 10
+	help
+	  Number of times to back off and retry when listen-before-talk
+	  reports the channel busy before giving up on a frame.
+
+config AETHER_DECT_CAD_BACKOFF_MAX_MS
+	int "Maximum channel-busy backoff in milliseconds"
+	default 100
+	range 5 500
+	help
+	  Maximum random backoff between retries when the channel is busy.
+
+config AETHER_DECT_RX_QUEUE_SIZE
+	int "RX message queue size in frames"
+	default 8
+	range 4 32
+
+config AETHER_DECT_TX_QUEUE_SIZE
+	int "TX message queue size in frames"
+	default 4
+	range 2 16
+
+config AETHER_DECT_RX_STACK_SIZE
+	int "RX thread stack size in bytes"
+	default 2048
+	range 1024 8192
+
+config AETHER_DECT_TX_STACK_SIZE
+	int "Radio thread stack size in bytes"
+	default 2048
+	range 1024 8192
+
+config AETHER_DECT_RX_THREAD_PRIO
+	int "RX thread priority"
+	default 2
+	range 0 16
+
+config AETHER_DECT_TX_THREAD_PRIO
+	int "Radio thread priority"
+	default 3
+	range 0 16
+
+endif # AETHER_DECT
 
 endif # NET_L2_CUSTOM

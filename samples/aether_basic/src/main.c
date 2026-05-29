@@ -13,7 +13,46 @@
 
 LOG_MODULE_REGISTER(aether_basic, LOG_LEVEL_INF);
 
+#include <string.h>
+#include <stdio.h>
+#include <zephyr/shell/shell_uart.h>
+
+/* Mesh context, for detailed status (defined in aether_mesh.c). */
+extern struct aether_mesh_ctx *g_mesh_ctx;
+
 static struct net_if *aether_iface;
+
+/* Per-node shell prompt, e.g. "ae 1a:2b> ", set once the address is known. */
+static char node_prompt[16];
+
+static const char *heymac_state_name(enum heymac_state state)
+{
+	switch (state) {
+	case HEYMAC_STATE_INITIAL:      return "INITIAL";
+	case HEYMAC_STATE_INITIALIZING: return "INITIALIZING";
+	case HEYMAC_STATE_LURKING:      return "LURKING";
+	case HEYMAC_STATE_BEACONING:    return "BEACONING";
+	case HEYMAC_STATE_LINKING:      return "LINKING";
+	default:                        return "?";
+	}
+}
+
+/* Party-line broadcast address: every node receives and re-floods. */
+static const uint8_t aether_bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+/* Party-line chat receive callback: print each incoming message to the
+ * console. Runs in the mesh RX thread; printk is used so the line appears
+ * regardless of which shell instance (if any) issued a command.
+ */
+static void chat_recv_cb(struct net_if *iface, const uint8_t src[6],
+			 const uint8_t *data, size_t len, void *user_data)
+{
+	ARG_UNUSED(iface);
+	ARG_UNUSED(user_data);
+
+	/* Identify the talker by the last two address bytes. */
+	printk("\n<chat %02x:%02x> %.*s\n", src[4], src[5], (int)len, (const char *)data);
+}
 
 static void print_status(void)
 {
@@ -114,6 +153,23 @@ int main(void)
 
 	LOG_INF("Æther mesh network ready");
 
+	/* Print received party-line messages to the console. */
+	aether_mesh_register_recv_callback(aether_iface, chat_recv_cb, NULL);
+	LOG_INF("Party-line chat ready: type 'aether chat <message>'");
+
+	/* Tag the shell prompt with this node's address so the three terminals
+	 * are easy to tell apart. The tag matches the talker ID shown in chat.
+	 */
+	if (g_mesh_ctx) {
+		const struct shell *sh = shell_backend_uart_get_ptr();
+
+		snprintf(node_prompt, sizeof(node_prompt), "ae %02x:%02x> ",
+			 g_mesh_ctx->local_addr[4], g_mesh_ctx->local_addr[5]);
+		if (sh) {
+			shell_prompt_change(sh, node_prompt);
+		}
+	}
+
 	/* Print initial status */
 	print_status();
 
@@ -140,42 +196,61 @@ int main(void)
 
 static int cmd_aether_status(const struct shell *sh, size_t argc, char **argv)
 {
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	struct heymac_context *hctx;
+
 	ARG_UNUSED(argc);
 	ARG_UNUSED(argv);
 
-	if (!aether_iface) {
+	if (!aether_iface || !ctx) {
 		shell_error(sh, "Æther interface not available");
 		return -ENODEV;
 	}
 
-	/* Print detailed status */
-	struct heymac_addr addr;
-	int net_id;
-	int neighbor_count, route_count;
-
 	shell_print(sh, "=== Æther Node Status ===");
+	shell_print(sh, "  addr   %02x:%02x:%02x:%02x:%02x:%02x",
+		    ctx->local_addr[0], ctx->local_addr[1], ctx->local_addr[2],
+		    ctx->local_addr[3], ctx->local_addr[4], ctx->local_addr[5]);
+	shell_print(sh, "  net_id 0x%04x", ctx->mesh_net_id);
 
-	if (heymac_get_addr(aether_iface, &addr) == 0) {
-		if (heymac_addr_is_short(&addr)) {
-			shell_print(sh, "Local address: %02x:%02x (short)",
-				    addr.short_addr[0], addr.short_addr[1]);
-		} else {
-			shell_print(sh, "Local address: %02x:%02x:%02x:%02x:%02x:%02x (long)",
-				    addr.long_addr[0], addr.long_addr[1], addr.long_addr[2],
-				    addr.long_addr[3], addr.long_addr[4], addr.long_addr[5]);
+	hctx = net_if_l2_data(aether_iface);
+	if (hctx) {
+		shell_print(sh, "  state  %s", heymac_state_name(hctx->state));
+		shell_print(sh, "  rx/tx  %u/%u pkts, %u/%u err",
+			    hctx->rx_packets, hctx->tx_packets,
+			    hctx->rx_errors, hctx->tx_errors);
+		shell_print(sh, "  beacon tx %u, rx %u", hctx->tx_beacons, hctx->rx_beacons);
+	}
+
+	/* Neighbors with link quality and recency. */
+	shell_print(sh, "  neighbors %d", aether_mesh_get_neighbor_count(aether_iface));
+	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
+		if (ctx->neighbors[i].active) {
+			uint32_t age = (k_uptime_get_32() - ctx->neighbors[i].last_seen) / 1000;
+
+			shell_print(sh, "    %02x:%02x:%02x:%02x:%02x:%02x  rssi %d  %us ago",
+				    ctx->neighbors[i].addr[0], ctx->neighbors[i].addr[1],
+				    ctx->neighbors[i].addr[2], ctx->neighbors[i].addr[3],
+				    ctx->neighbors[i].addr[4], ctx->neighbors[i].addr[5],
+				    ctx->neighbors[i].rssi, age);
 		}
 	}
 
-	net_id = heymac_get_network_id(aether_iface);
-	if (net_id >= 0) {
-		shell_print(sh, "Network ID: 0x%04x", net_id);
+	/* Routes. */
+	shell_print(sh, "  routes %d", aether_mesh_get_route_count(aether_iface));
+	for (int i = 0; i < CONFIG_AETHER_MAX_ROUTES; i++) {
+		if (ctx->routes[i].active) {
+			shell_print(sh, "    %02x:%02x:%02x:%02x:%02x:%02x  via %02x:%02x  hops %d",
+				    ctx->routes[i].dest[0], ctx->routes[i].dest[1],
+				    ctx->routes[i].dest[2], ctx->routes[i].dest[3],
+				    ctx->routes[i].dest[4], ctx->routes[i].dest[5],
+				    ctx->routes[i].next_hop[4], ctx->routes[i].next_hop[5],
+				    ctx->routes[i].hop_count);
+		}
 	}
 
-	neighbor_count = aether_mesh_get_neighbor_count(aether_iface);
-	route_count = aether_mesh_get_route_count(aether_iface);
-	
-	shell_print(sh, "Neighbors: %d", neighbor_count);
-	shell_print(sh, "Routes: %d", route_count);
+	shell_print(sh, "  hello  sent %u, recv %u", ctx->hello_sent, ctx->hello_received);
+	shell_print(sh, "  fwd %u, drop %u", ctx->packets_forwarded, ctx->packets_dropped);
 
 	return 0;
 }
@@ -246,10 +321,90 @@ static int cmd_aether_send(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_aether_info(const struct shell *sh, size_t argc, char **argv)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	struct heymac_context *hctx;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!aether_iface || !ctx) {
+		shell_error(sh, "Æther interface not available");
+		return -ENODEV;
+	}
+
+	hctx = net_if_l2_data(aether_iface);
+
+	shell_print(sh, "=== Æther Parameters ===");
+	shell_print(sh, "  addr        %02x:%02x:%02x:%02x:%02x:%02x",
+		    ctx->local_addr[0], ctx->local_addr[1], ctx->local_addr[2],
+		    ctx->local_addr[3], ctx->local_addr[4], ctx->local_addr[5]);
+	shell_print(sh, "  net_id      0x%04x", ctx->mesh_net_id);
+	shell_print(sh, "  mac state   %s", hctx ? heymac_state_name(hctx->state) : "?");
+	shell_print(sh, "  ttl         %d hops", CONFIG_AETHER_DEFAULT_TTL);
+	shell_print(sh, "  hello int   %d s", CONFIG_AETHER_HELLO_INTERVAL);
+	shell_print(sh, "  beacon int  %d ms", CONFIG_HEYMAC_BEACON_INTERVAL_MS);
+	shell_print(sh, "  nbr timeout %d s", CONFIG_AETHER_NEIGHBOR_TIMEOUT);
+	shell_print(sh, "  route tmout %d s", CONFIG_AETHER_ROUTE_TIMEOUT);
+	shell_print(sh, "  max payload %d bytes", CONFIG_AETHER_MAX_PAYLOAD);
+	shell_print(sh, "  max nbrs    %d", CONFIG_AETHER_MAX_NEIGHBORS);
+	shell_print(sh, "  max routes  %d", CONFIG_AETHER_MAX_ROUTES);
+
+	return 0;
+}
+
+static int cmd_aether_chat(const struct shell *sh, size_t argc, char **argv)
+{
+	char msg[CONFIG_AETHER_MAX_PAYLOAD + 1];
+	size_t off = 0;
+	int ret;
+
+	if (argc < 2) {
+		shell_error(sh, "Usage: aether chat <message>");
+		return -EINVAL;
+	}
+
+	if (!aether_iface) {
+		shell_error(sh, "Æther interface not available");
+		return -ENODEV;
+	}
+
+	/* Rejoin the shell-split words into one message. */
+	for (size_t i = 1; i < argc; i++) {
+		size_t word_len = strlen(argv[i]);
+
+		if (off + word_len + (i > 1 ? 1 : 0) >= sizeof(msg)) {
+			shell_error(sh, "Message too long (max %d bytes)",
+				    CONFIG_AETHER_MAX_PAYLOAD);
+			return -EMSGSIZE;
+		}
+		if (i > 1) {
+			msg[off++] = ' ';
+		}
+		memcpy(&msg[off], argv[i], word_len);
+		off += word_len;
+	}
+	msg[off] = '\0';
+
+	/* Party-line: broadcast to every node in the mesh. */
+	ret = aether_mesh_send(aether_iface, aether_bcast, (const uint8_t *)msg, off,
+			       AETHER_PRIORITY_NORMAL);
+	if (ret < 0) {
+		shell_error(sh, "chat send failed: %d", ret);
+		return ret;
+	}
+
+	shell_print(sh, "<you> %s", msg);
+	return 0;
+}
+
 SHELL_STATIC_SUBCMD_SET_CREATE(aether_cmds,
+	SHELL_CMD_ARG(info, NULL, "Show Æther parameters and MAC state", cmd_aether_info, 1, 0),
 	SHELL_CMD_ARG(status, NULL, "Show Æther node status", cmd_aether_status, 1, 0),
 	SHELL_CMD_ARG(hello, NULL, "Send hello message", cmd_aether_hello, 1, 0),
-	SHELL_CMD_ARG(send, NULL, "Send mesh message", cmd_aether_send, 3, 0),
+	SHELL_CMD_ARG(chat, NULL, "Broadcast a party-line message", cmd_aether_chat, 2, 20),
+	SHELL_CMD_ARG(send, NULL, "Send mesh message to <addr>", cmd_aether_send, 3, 0),
 	SHELL_SUBCMD_SET_END
 );
 

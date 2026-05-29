@@ -6,6 +6,7 @@ build/
 build-*/
 **/build/
 **/build-*/
+**/build_dect/
 
 # West workspace files (if this repo is used as a workspace)
 .west/

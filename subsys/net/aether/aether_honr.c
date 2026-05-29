@@ -45,6 +45,9 @@ int aether_honr_next_hop(struct net_if *iface, const uint8_t dst[6], uint8_t nex
 	if (self == dst16) {
 		return -EALREADY;
 	}
+	if (!honr_is_valid_node(dst16)) {
+		return -EINVAL; /* refuse to route on a malformed destination */
+	}
 
 	nh = honr_next_hop(self, dst16);
 
@@ -75,6 +78,11 @@ bool aether_honr_should_relay(struct net_if *iface, const uint8_t resender[6],
 	self = aether_honr_addr16(ctx->local_addr);
 	res16 = aether_honr_addr16(resender);
 	dst16 = aether_honr_addr16(dst);
+
+	/* Refuse to act on malformed addresses received over the air. */
+	if (!honr_is_valid_node(dst16) || !honr_is_valid_node(res16)) {
+		return false;
+	}
 
 	return honr_should_relay(self, res16, dst16);
 }
@@ -239,6 +247,9 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 		if (parent_free == 0) {
 			break; /* parent has no room */
 		}
+		if (!honr_is_valid_node(parent_addr)) {
+			break; /* ignore an announcement with a malformed address */
+		}
 
 		/* Request an address from this parent (id + chosen parent). */
 		memcpy(req, ctx->local_addr, 6);
@@ -291,6 +302,10 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 			break; /* not our reply */
 		}
 		assigned = (uint16_t)((payload[6] << 8) | payload[7]);
+		if (!honr_is_valid_node(assigned) || honr_is_root(assigned)) {
+			LOG_WRN("HONR: rejecting invalid assigned address %04x", assigned);
+			break;
+		}
 		ctx->honr_addr = assigned;
 		ctx->local_addr[4] = payload[6];
 		ctx->local_addr[5] = payload[7];

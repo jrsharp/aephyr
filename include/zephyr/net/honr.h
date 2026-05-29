@@ -43,6 +43,11 @@ extern "C" {
 #define HONR_CHILD_MAX     0xEU     /**< Highest child nibble value (14 children). */
 #define HONR_BCAST_NIBBLE  0xFU     /**< Reserved child-broadcast nibble. */
 
+/* Compile-time invariants (portable: keyword, no <assert.h>). */
+_Static_assert(HONR_NIBBLES * 4U == 16U, "HONR address must be 16 bits");
+_Static_assert(HONR_CHILD_MAX == 0xEU, "14 children per node");
+_Static_assert(HONR_BCAST_NIBBLE == 0xFU, "broadcast nibble is 0xF");
+
 /** @brief Nibble @p i (0 = most significant) of a 16-bit address. */
 static inline uint8_t honr_nibble(uint16_t addr, unsigned int i)
 {
@@ -53,8 +58,9 @@ static inline uint8_t honr_nibble(uint16_t addr, unsigned int i)
 static inline uint16_t honr_set_nibble(uint16_t addr, unsigned int i, uint8_t v)
 {
 	unsigned int shift = 12U - 4U * i;
+	unsigned int cleared = (unsigned int)addr & ~(0xFU << shift);
 
-	return (uint16_t)((addr & ~(0xFU << shift)) | (((uint16_t)(v & 0xFU)) << shift));
+	return (uint16_t)(cleared | (((unsigned int)(v & 0xFU)) << shift));
 }
 
 /** @brief Rank (tree depth): index of the left-most zero nibble. 0 = root. */
@@ -84,7 +90,37 @@ static inline uint16_t honr_parent(uint16_t addr)
 	if (rank == 0U) {
 		return HONR_ROOT;
 	}
-	return honr_set_nibble(addr, rank - 1U, 0U);
+	return honr_set_nibble(addr, (unsigned int)(rank - 1U), 0U);
+}
+
+/**
+ * @brief True if @p addr is a well-formed HONR *node* address.
+ *
+ * A node address is a left-justified path of child nibbles (1..14) followed by
+ * zeros: every nibble before the first zero must be in 1..14, and every nibble
+ * from the first zero onward must be zero. The root (0x0000) is valid; the
+ * broadcast nibble (0xF) is not allowed in a node address. Use this to reject
+ * malformed or untrusted addresses received over the air before routing on
+ * them (the routing math assumes well-formed input).
+ */
+static inline bool honr_is_valid_node(uint16_t addr)
+{
+	bool in_zeros = false;
+
+	for (unsigned int i = 0; i < HONR_NIBBLES; i++) {
+		uint8_t nb = honr_nibble(addr, i);
+
+		if (in_zeros) {
+			if (nb != 0U) {
+				return false; /* non-zero after the path ended */
+			}
+		} else if (nb == 0U) {
+			in_zeros = true;
+		} else if (nb > HONR_CHILD_MAX) {
+			return false; /* 0xF or otherwise out of child range */
+		}
+	}
+	return true;
 }
 
 /** @brief Nearest common ancestor: the shared left-to-right nibble prefix. */

@@ -143,10 +143,18 @@ without a radio:
    Twister on `qemu_x86` / `native_sim` (Linux/CI):
    `west twister -T tests/subsys/honr -p native_sim`.
 2. **Protocol simulator (host):** `tests/host/honr_sim.c` builds random trees by
-   simulating the join (parent child-nibble allocation) and verifies all-pairs
-   routing over each. Pure C, runs anywhere:
-   `cc -I include/zephyr/net tests/host/honr_sim.c -o /tmp/honr_sim && /tmp/honr_sim`
-   (200 trees × ~60 nodes = ~700k pairs, must report 0 failures).
+   simulating the join and verifies all-pairs routing over each;
+   `tests/host/honr_validity.c` cross-checks `honr_is_valid_node()` against an
+   independently constructed set of all valid addresses (41371 of 65536) and
+   that the math preserves validity. Run all host tests under
+   `-Werror -Wconversion -Wsign-conversion` + UBSan/ASan with
+   `make -C tests/host`.
+
+   Addresses received over the air are untrusted, so the firmware rejects
+   malformed ones at the boundary: `honr_is_valid_node()` gates the join reply,
+   announcements, and the destination before routing. A node address must be a
+   left-justified path of child nibbles (1..14) then zeros; anything else
+   (interior gap, or the 0xF broadcast nibble) is dropped rather than routed on.
 3. **Integration (multi-node, over a topology):** `tests/host/honr_mesh_sim.c`
    models an RF medium as a who-hears-whom matrix and runs the discrete-event
    join (single-hop announce/req/rep) and HONR forwarding across line, star,

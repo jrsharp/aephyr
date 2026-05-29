@@ -42,6 +42,16 @@ struct phy_ctrl_field_common {
 	uint32_t pad : 24;
 };
 
+/* The Type 1 header is written through the overlay above into the modem's PHY
+ * header union, so it must fit; the addressed Type 2 form must stay 10 bytes
+ * (it carries the receiver identity). These break the build loudly if the
+ * modem header layout ever changes.
+ */
+BUILD_ASSERT(sizeof(union nrf_modem_dect_phy_hdr) >= sizeof(struct phy_ctrl_field_common),
+	     "Type 1 header overlay does not fit the modem PHY header union");
+BUILD_ASSERT(sizeof(((union nrf_modem_dect_phy_hdr *)0)->type_2) == 10,
+	     "unexpected DECT NR+ Type 2 header size");
+
 /* Synchronizes blocking calls with their modem completion event. */
 static K_SEM_DEFINE(operation_sem, 0, 1);
 

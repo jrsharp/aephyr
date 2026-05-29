@@ -52,7 +52,10 @@ static void heymac_enter_beaconing(struct heymac_context *ctx)
     k_work_schedule(&ctx->timeout_work, K_SECONDS(60));
 }
 
-static void heymac_enter_linking(struct heymac_context *ctx)
+/* LINKING is reserved for a future link-establishment step and is not yet
+ * entered by the state machine.
+ */
+static __maybe_unused void heymac_enter_linking(struct heymac_context *ctx)
 {
     LOG_DBG("Entering LINKING state");
     ctx->state = HEYMAC_STATE_LINKING;
@@ -92,9 +95,11 @@ void heymac_state_machine_run(struct heymac_context *ctx, enum heymac_event even
         case HEYMAC_EVENT_FRAME_RECEIVED:
             /* Process received frame */
             break;
+        default:
+            break;
         }
         break;
-        
+
     case HEYMAC_STATE_BEACONING:
         switch (event) {
         case HEYMAC_EVENT_BEACON_TIMEOUT:

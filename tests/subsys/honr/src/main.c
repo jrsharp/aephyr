@@ -135,4 +135,47 @@ ZTEST(honr, test_all_pairs_route)
 	}
 }
 
+/* --- Address validation -------------------------------------------------- */
+
+ZTEST(honr, test_validity)
+{
+	/* Well-formed node addresses. */
+	zassert_true(honr_is_valid_node(0x0000), "root valid");
+	zassert_true(honr_is_valid_node(0x1000), "depth-1 valid");
+	zassert_true(honr_is_valid_node(0x1230), "path valid");
+	zassert_true(honr_is_valid_node(0xC59A), "full-depth valid");
+
+	/* Malformed: a non-zero nibble after the path has ended. */
+	zassert_false(honr_is_valid_node(0x0100), "0x0100 (interior gap) invalid");
+	zassert_false(honr_is_valid_node(0x00C5), "0x00C5 (leading zeros) invalid");
+	zassert_false(honr_is_valid_node(0x10F0), "0x10F0 (gap) invalid");
+
+	/* Malformed: the broadcast nibble inside a node address. */
+	zassert_false(honr_is_valid_node(0xF000), "0xF000 invalid");
+	zassert_false(honr_is_valid_node(0x1F23), "0x1F23 invalid");
+}
+
+/* Exhaustive invariant: over the whole 16-bit space, validity is consistent
+ * with the address math (parent of a valid address is valid, one rank shallower,
+ * and an ancestor).
+ */
+ZTEST(honr, test_validity_preserved)
+{
+	for (uint32_t a = 0; a <= 0xFFFF; a++) {
+		uint16_t addr = (uint16_t)a;
+
+		if (!honr_is_valid_node(addr)) {
+			continue;
+		}
+		zassert_true(honr_rank(addr) <= HONR_NIBBLES, "rank in range");
+		if (!honr_is_root(addr)) {
+			uint16_t p = honr_parent(addr);
+
+			zassert_true(honr_is_valid_node(p), "parent of valid is valid");
+			zassert_equal(honr_rank(p), honr_rank(addr) - 1, "parent rank-1");
+			zassert_true(honr_is_ancestor(p, addr), "parent is ancestor");
+		}
+	}
+}
+
 ZTEST_SUITE(honr, NULL, NULL, NULL, NULL, NULL);

@@ -83,6 +83,10 @@ static atomic_t tx_paused;
  */
 static uint8_t tx_frame_buf[256];
 
+/* Guard against silently truncating an outbound frame. */
+BUILD_ASSERT(sizeof(tx_frame_buf) >= HEYMAC_MAX_FRAME_SIZE,
+	     "tx_frame_buf too small for a maximum HeyMac frame");
+
 /* Transmit one already-linearized frame with LBT and bounded busy-retry.
  * Returns 0 on success, negative errno otherwise. Takes radio_lock. */
 static int aether_dect_radio_tx(struct aether_dect_ctx *ctx, const uint8_t *data, size_t len,

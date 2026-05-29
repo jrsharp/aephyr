@@ -112,7 +112,6 @@ int main(void)
 		LOG_ERR("No network interface available");
 		
 		/* List all available interfaces for debugging */
-		struct net_if *iface;
 		int count = 0;
 		STRUCT_SECTION_FOREACH(net_if, iface) {
 			LOG_INF("Found interface %d: %p", count, iface);

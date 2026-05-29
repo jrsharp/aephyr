@@ -132,6 +132,30 @@ per-hop next hop is conveyed from the mesh layer to the driver via
 `net_pkt_lladdr_dst` (2 bytes), which is stored by value in the packet and so
 survives the transmit queue.
 
+## Testing (before hardware)
+
+Everything above the PHY is plain Zephyr/C, so the stack is validated in layers
+without a radio:
+
+1. **Unit (on-target ztest):** `tests/subsys/honr` exercises the `honr.h`
+   primitives and a property test that simulates forwarding between every pair
+   of nodes in a tree, asserting optimal hop count and no loops. Runs under
+   Twister on `qemu_x86` / `native_sim` (Linux/CI):
+   `west twister -T tests/subsys/honr -p native_sim`.
+2. **Protocol simulator (host):** `tests/host/honr_sim.c` builds random trees by
+   simulating the join (parent child-nibble allocation) and verifies all-pairs
+   routing over each. Pure C, runs anywhere:
+   `cc -I include/zephyr/net tests/host/honr_sim.c -o /tmp/honr_sim && /tmp/honr_sim`
+   (200 trees × ~60 nodes = ~700k pairs, must report 0 failures).
+3. **Integration (multi-node sim):** swap `aether_dect` for a simulated radio
+   net-device backed by a socket "RF hub" that enforces a who-hears-whom matrix
+   (place A out of range of C to force a relay through B). Runs the real
+   HeyMac + mesh + HONR + driver stack across several native_sim/qemu nodes;
+   extends `tests/integration/multinode`. (Not yet implemented.)
+4. **CI matrix:** Twister for all ztests plus a compile matrix over both routing
+   modes and board targets (nrf9151dk, thingy91x).
+5. **On-device:** the real DECT PHY on three Thingy:91 X.
+
 ## Trade-offs
 
 - **Bounds:** 4 levels deep × 14 children. Fine for small structured networks

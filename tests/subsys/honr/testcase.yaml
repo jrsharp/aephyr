@@ -1,0 +1,8 @@
+# SPDX-License-Identifier: MIT
+
+tests:
+  aether.honr.addressing:
+    tags: aether honr routing
+    platform_allow:
+      - qemu_x86
+      - native_sim

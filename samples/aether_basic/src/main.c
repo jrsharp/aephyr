@@ -342,6 +342,10 @@ static int cmd_aether_info(const struct shell *sh, size_t argc, char **argv)
 		    ctx->local_addr[3], ctx->local_addr[4], ctx->local_addr[5]);
 	shell_print(sh, "  net_id      0x%04x", ctx->mesh_net_id);
 	shell_print(sh, "  mac state   %s", hctx ? heymac_state_name(hctx->state) : "?");
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+	shell_print(sh, "  honr addr   %04x (%s)", ctx->honr_addr,
+		    ctx->honr_joined ? "joined" : "unjoined");
+#endif
 	shell_print(sh, "  ttl         %d hops", CONFIG_AETHER_DEFAULT_TTL);
 	shell_print(sh, "  hello int   %d s", CONFIG_AETHER_HELLO_INTERVAL);
 	shell_print(sh, "  beacon int  %d ms", CONFIG_HEYMAC_BEACON_INTERVAL_MS);

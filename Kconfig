@@ -160,6 +160,23 @@ config AETHER_ROUTING_HONR
 
 endchoice
 
+config AETHER_HONR_ROOT
+	bool "This node is the HONR tree root"
+	depends on AETHER_ROUTING_HONR
+	help
+	  The root owns HONR address 0x0000 and anchors the tree. Exactly one
+	  node in the network must enable this; every other node starts
+	  unaddressed and joins under a parent.
+
+config AETHER_HONR_ANNOUNCE_INTERVAL_SECONDS
+	int "HONR tree announce interval in seconds"
+	depends on AETHER_ROUTING_HONR
+	default 5
+	range 1 120
+	help
+	  How often an addressed node broadcasts a tree announcement (its HONR
+	  address and free-child bitmap) so unaddressed neighbors can join.
+
 config AETHER_SHELL
 	bool "Æther shell commands"
 	depends on SHELL

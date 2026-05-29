@@ -123,6 +123,13 @@ struct aether_mesh_ctx {
 	uint8_t local_addr[6];
 	uint8_t seq_no;
 
+	/* HONR16 tree-routing state (used when CONFIG_AETHER_ROUTING_HONR).
+	 * The 16-bit honr_addr is mirrored in local_addr[4..5].
+	 */
+	uint16_t honr_addr;
+	uint16_t honr_child_bitmap;  /* bit n (1..14) set = child nibble allocated */
+	bool honr_joined;
+
 	/* Application receive callback */
 	aether_mesh_recv_cb_t recv_cb;
 	void *recv_cb_user_data;
@@ -354,6 +361,13 @@ int aether_honr_next_hop(struct net_if *iface, const uint8_t dst[6], uint8_t nex
 /** @brief True if this node is the HONR next hop for a frame from @p resender to @p dst. */
 bool aether_honr_should_relay(struct net_if *iface, const uint8_t resender[6],
 			      const uint8_t dst[6]);
+
+/** @brief Initialize HONR tree state and start announcing/joining. */
+void aether_honr_join_init(struct net_if *iface);
+
+/** @brief Handle a received HONR tree control frame (ANNOUNCE/JOIN_REQ/JOIN_REP). */
+void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t src[6],
+			     const uint8_t *payload, uint16_t len);
 
 /**
  * @brief Pause TX thread to keep radio in RX mode

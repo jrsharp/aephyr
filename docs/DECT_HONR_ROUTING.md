@@ -150,9 +150,13 @@ hooks (`dect_phy_set_node_id`, per-frame receiver id) are small additions to
    node is the HONR next hop for the frame's resender → destination). The
    resender is the immediate L2 sender, stashed by HeyMac as
    `heymac_context.last_rx_src`. Both modes build for nrf9151/ns.
-3. Parent-attach join + free-child bitmap in beacons (`heymac` HSM hooks) so the
-   short addresses actually form a HONR tree (required before HONR unicast
-   delivers; until then addresses are random and frames will not route).
+3. (done) Parent-attach join: addressed nodes periodically broadcast a
+   TREE_ANNOUNCE (HONR address + free-child bitmap); an unaddressed node picks a
+   parent and sends TREE_JOIN_REQ (its id + chosen parent); the parent allocates
+   the next free child nibble and replies TREE_JOIN_REP with the child address.
+   Root is `CONFIG_AETHER_HONR_ROOT` (address 0x0000). Implemented in
+   `aether_honr.c`; `aether info` shows the assigned HONR address and join state.
+   (Single mesh instance; no slot/clock sync yet.)
 4. DECT identity hookup: `transmitter_id`/`receiver_identity` from the HONR
    address + RX hardware filter; confirm the unicast PHY header format.
 5. Bring-up on three nodes: root + two children, verify up/down delivery and

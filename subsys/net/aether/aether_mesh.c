@@ -244,6 +244,11 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 
 	g_mesh_ctx = ctx;
 
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+	/* Bring up HONR tree state (root anchors 0x0000; others join). */
+	aether_honr_join_init(iface);
+#endif
+
 	LOG_INF("Æther mesh initialized, net_id=0x%04x", mesh_net_id);
 	return 0;
 }
@@ -660,6 +665,15 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 #endif
 		}
 		break;
+
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+	case AETHER_MSG_TREE_ANNOUNCE:
+	case AETHER_MSG_TREE_JOIN_REQ:
+	case AETHER_MSG_TREE_JOIN_REP:
+		aether_honr_handle_ctrl(iface, hdr.type, hdr.src, buf + hdr_len, hdr.length);
+		net_pkt_unref(pkt);
+		break;
+#endif
 
 	default:
 		LOG_DBG("Received unknown mesh message type: %d", hdr.type);

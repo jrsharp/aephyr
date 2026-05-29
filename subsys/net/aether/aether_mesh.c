@@ -597,7 +597,38 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			LOG_DBG("Forwarding packet to %02x:%02x:%02x:%02x:%02x:%02x",
 				hdr.dst[0], hdr.dst[1], hdr.dst[2],
 				hdr.dst[3], hdr.dst[4], hdr.dst[5]);
-			
+
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+			/* Stateless HONR forward: relay only if we are the next hop
+			 * for this frame from its immediate sender (resender). Other
+			 * overhearing nodes drop it, so there is no flood. */
+			struct heymac_context *hm = net_if_l2_data(iface);
+			uint8_t resender[6] = {0};
+
+			if (hm) {
+				resender[4] = hm->last_rx_src.short_addr[0];
+				resender[5] = hm->last_rx_src.short_addr[1];
+			}
+			if (!aether_honr_should_relay(iface, resender, hdr.dst)) {
+				LOG_DBG("HONR: not the next hop, dropping");
+				ctx->packets_dropped++;
+				net_pkt_unref(pkt);
+				break;
+			}
+			if (hdr.ttl <= 1) {
+				LOG_DBG("Packet TTL expired, dropping");
+				ctx->packets_dropped++;
+				net_pkt_unref(pkt);
+				break;
+			}
+			hdr.ttl--;
+			if (pkt->buffer && pkt->buffer->data) {
+				pkt->buffer->data[2] = hdr.ttl;
+			}
+			net_if_queue_tx(iface, pkt);
+			ctx->packets_forwarded++;
+			LOG_DBG("HONR forwarded toward %02x:%02x", hdr.dst[4], hdr.dst[5]);
+#else
 			/* Decrement TTL and check if packet should be dropped */
 			if (hdr.ttl <= 1) {
 				LOG_DBG("Packet TTL expired, dropping");
@@ -606,7 +637,7 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 				break;
 			}
 			hdr.ttl--;
-			
+
 			/* Find route to destination */
 			uint8_t next_hop[6];
 			int ret = aether_mesh_find_route(iface, hdr.dst, next_hop);
@@ -616,16 +647,17 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 				net_pkt_unref(pkt);
 				break;
 			}
-			
+
 			/* Update mesh header with decremented TTL */
 			if (pkt->buffer && pkt->buffer->data) {
 				pkt->buffer->data[2] = hdr.ttl;  /* TTL is at offset 2 in mesh header */
 			}
-			
+
 			/* Forward packet via L2 layer */
 			net_if_queue_tx(iface, pkt);
 			ctx->packets_forwarded++;
 			LOG_DBG("Packet forwarded to next hop");
+#endif
 		}
 		break;
 

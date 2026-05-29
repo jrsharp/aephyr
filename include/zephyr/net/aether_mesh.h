@@ -337,6 +337,24 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
  */
 int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries);
 
+/* HONR16 structured tree routing helpers (CONFIG_AETHER_ROUTING_HONR).
+ * The 16-bit HONR address is carried in the low two bytes of the 6-byte
+ * mesh address (addr[4], addr[5]).
+ */
+
+/** @brief Extract the 16-bit HONR address from a 6-byte mesh address. */
+uint16_t aether_honr_addr16(const uint8_t addr6[6]);
+
+/**
+ * @brief Compute the next-hop (6-byte) toward @p dst using HONR tree routing.
+ * @return 0 on success; -EALREADY if this node is already @p dst.
+ */
+int aether_honr_next_hop(struct net_if *iface, const uint8_t dst[6], uint8_t next_hop[6]);
+
+/** @brief True if this node is the HONR next hop for a frame from @p resender to @p dst. */
+bool aether_honr_should_relay(struct net_if *iface, const uint8_t resender[6],
+			      const uint8_t dst[6]);
+
 /**
  * @brief Pause TX thread to keep radio in RX mode
  *

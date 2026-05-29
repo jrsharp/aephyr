@@ -339,6 +339,9 @@ void heymac_recv(struct net_if *iface, struct net_pkt *pkt)
 	LOG_INF("HeyMac RX: type=%d, len=%zu",
 		hdr.version_type & 0x0F, len - hdr_len);
 
+	/* Remember the immediate sender (resender) for stateless HONR routing. */
+	memcpy(&ctx->last_rx_src, &hdr.src_addr, sizeof(ctx->last_rx_src));
+
 #ifdef CONFIG_AETHER_MESH
 	/* Pass to Æther mesh layer if available */
 	if ((hdr.version_type & 0x0F) == HEYMAC_FRM_TYPE_DATA) {

@@ -136,6 +136,30 @@ config AETHER_MAX_PAYLOAD
 	  255 bytes per LoRa packet. Larger payloads reduce fragmentation
 	  overhead for 9P transport.
 
+choice AETHER_ROUTING
+	prompt "Mesh routing mode"
+	default AETHER_ROUTING_AODV
+	help
+	  Selects how the Æther mesh forwards unicast frames.
+
+config AETHER_ROUTING_AODV
+	bool "Reactive (AODV-style RREQ/RREP)"
+	help
+	  On-demand route discovery with a next-hop route table. Robust across
+	  arbitrary topologies and mobility.
+
+config AETHER_ROUTING_HONR
+	bool "HONR16 structured tree routing [EXPERIMENTAL]"
+	select EXPERIMENTAL
+	help
+	  Stateless tree routing over HONR16 hierarchical addresses: forward up
+	  to the nearest common ancestor of resender and destination, then down,
+	  with no route tables and no route discovery. Requires HONR address
+	  assignment (tree join) to form a valid tree before unicast delivery
+	  works; see docs/DECT_HONR_ROUTING.md.
+
+endchoice
+
 config AETHER_SHELL
 	bool "Æther shell commands"
 	depends on SHELL

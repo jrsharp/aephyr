@@ -190,6 +190,7 @@ int aether_mesh_remove_route(struct net_if *iface, const uint8_t dest[6])
 }
 
 /* Route request/reply handling */
+#if !defined(CONFIG_AETHER_ROUTING_HONR)
 static int aether_mesh_send_rreq(struct net_if *iface, const uint8_t dest[6])
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
@@ -267,6 +268,7 @@ static int aether_mesh_send_rreq(struct net_if *iface, const uint8_t dest[6])
 		dest[0], dest[1], dest[2], dest[3], dest[4], dest[5]);
 	return 0;
 }
+#endif /* !CONFIG_AETHER_ROUTING_HONR */
 
 /* Mesh data transmission */
 int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
@@ -290,6 +292,11 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 	bool is_broadcast = (memcmp(dst, broadcast_addr, 6) == 0);
 
 	if (!is_broadcast) {
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+		/* HONR forwarding is stateless and receivers self-select the next
+		 * hop, so no route lookup or route discovery is needed here. */
+		ARG_UNUSED(next_hop);
+#else
 		/* Unicast - find route to destination */
 		ret = aether_mesh_find_route(iface, dst, next_hop);
 		if (ret < 0) {
@@ -297,6 +304,7 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 			LOG_DBG("No route to destination, sending RREQ");
 			return aether_mesh_send_rreq(iface, dst);
 		}
+#endif
 	}
 
 	/* Build mesh header */

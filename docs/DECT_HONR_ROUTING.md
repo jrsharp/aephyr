@@ -143,9 +143,16 @@ hooks (`dect_phy_set_node_id`, per-frame receiver id) are small additions to
 
 ## Implementation steps
 
-1. (done) `honr.h` core math + `native_sim` ztests for the primitives.
-2. `AETHER_ROUTING` Kconfig choice; HONR forward path in `aether_route.c`.
-3. Parent-attach join + free-child bitmap in beacons (`heymac` HSM hooks).
+1. (done) `honr.h` core math, verified against HeyMac's worked example.
+2. (done) `AETHER_ROUTING` Kconfig choice (AODV default / HONR); stateless HONR
+   forward path in `aether_honr.c`, wired into `aether_mesh_send` (no route
+   discovery) and the `aether_mesh_recv` forward decision (relay only if this
+   node is the HONR next hop for the frame's resender → destination). The
+   resender is the immediate L2 sender, stashed by HeyMac as
+   `heymac_context.last_rx_src`. Both modes build for nrf9151/ns.
+3. Parent-attach join + free-child bitmap in beacons (`heymac` HSM hooks) so the
+   short addresses actually form a HONR tree (required before HONR unicast
+   delivers; until then addresses are random and frames will not route).
 4. DECT identity hookup: `transmitter_id`/`receiver_identity` from the HONR
    address + RX hardware filter; confirm the unicast PHY header format.
 5. Bring-up on three nodes: root + two children, verify up/down delivery and

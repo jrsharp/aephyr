@@ -117,6 +117,7 @@ struct heymac_context {
 	
 	uint16_t net_id;
 	struct heymac_addr local_addr;
+	struct heymac_addr last_rx_src;  /* immediate sender of last RX frame (HONR resender) */
 	uint8_t tx_seq_no;
 	
 	/* Statistics */

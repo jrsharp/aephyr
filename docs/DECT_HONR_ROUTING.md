@@ -147,11 +147,18 @@ without a radio:
    routing over each. Pure C, runs anywhere:
    `cc -I include/zephyr/net tests/host/honr_sim.c -o /tmp/honr_sim && /tmp/honr_sim`
    (200 trees × ~60 nodes = ~700k pairs, must report 0 failures).
-3. **Integration (multi-node sim):** swap `aether_dect` for a simulated radio
-   net-device backed by a socket "RF hub" that enforces a who-hears-whom matrix
-   (place A out of range of C to force a relay through B). Runs the real
-   HeyMac + mesh + HONR + driver stack across several native_sim/qemu nodes;
-   extends `tests/integration/multinode`. (Not yet implemented.)
+3. **Integration (multi-node, over a topology):** `tests/host/honr_mesh_sim.c`
+   models an RF medium as a who-hears-whom matrix and runs the discrete-event
+   join (single-hop announce/req/rep) and HONR forwarding across line, star,
+   grid, and random topologies. It asserts every node joins over a real radio
+   link and every routing hop is a radio neighbour. Surfaces real constraints —
+   e.g. a corner-rooted 5x5 grid only joins 15/25 nodes because HONR is limited
+   to 4 levels of depth. Runs anywhere with a C compiler.
+   The firmware-level version (run the *actual* HeyMac + mesh + HONR + driver
+   across native_sim/qemu nodes) swaps `aether_dect` for a simulated-radio
+   net-device backed by a socket "RF hub" applying the same matrix, extending
+   `tests/integration/multinode`. That needs a Linux host (native_sim) and is
+   the recommended CI integration gate; not yet implemented.
 4. **CI matrix:** Twister for all ztests plus a compile matrix over both routing
    modes and board targets (nrf9151dk, thingy91x).
 5. **On-device:** the real DECT PHY on three Thingy:91 X.

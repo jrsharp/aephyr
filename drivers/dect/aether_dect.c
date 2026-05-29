@@ -28,6 +28,7 @@ LOG_MODULE_REGISTER(aether_dect, CONFIG_AETHER_DECT_LOG_LEVEL);
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/heymac.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/random/random.h>
 #include <string.h>
@@ -86,6 +87,9 @@ static uint8_t tx_frame_buf[256];
 /* Guard against silently truncating an outbound frame. */
 BUILD_ASSERT(sizeof(tx_frame_buf) >= HEYMAC_MAX_FRAME_SIZE,
 	     "tx_frame_buf too small for a maximum HeyMac frame");
+
+/* Interface link-layer address (net_if stores the pointer, so it must persist). */
+static uint8_t iface_ll_addr[6];
 
 /* Transmit one already-linearized frame with LBT and bounded busy-retry.
  * Returns 0 on success, negative errno otherwise. Takes radio_lock. */
@@ -452,6 +456,16 @@ static void aether_dect_iface_init(struct net_if *iface)
 	net_if_flag_set(iface, NET_IF_NO_AUTO_START);
 
 	heymac_iface_init(iface);
+
+	/* net_if requires a non-zero-length link-layer address before the
+	 * interface may go up (asserts otherwise). Derive a stable one from the
+	 * hardware ID; the mesh uses its own addressing, so this is only for the
+	 * net stack's bookkeeping.
+	 */
+	if (hwinfo_get_device_id(iface_ll_addr, sizeof(iface_ll_addr)) <= 0) {
+		memset(iface_ll_addr, 0xA5, sizeof(iface_ll_addr));
+	}
+	net_if_set_link_addr(iface, iface_ll_addr, sizeof(iface_ll_addr), NET_LINK_DUMMY);
 
 	LOG_DBG("Æther DECT interface initialized");
 }

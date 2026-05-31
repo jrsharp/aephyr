@@ -259,4 +259,4 @@ partition-table.bin
 !CONTRIBUTING.md
 !.gitkeep
 !docs/**/*.md
-!samples/**/README.md
+!samples/**/README.md**/build_*/

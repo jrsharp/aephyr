@@ -20,6 +20,7 @@ LOG_MODULE_REGISTER(aether_honr, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/aether_mesh.h>
 #include <zephyr/net/honr.h>
+#include <zephyr/drivers/hwinfo.h>
 #include <string.h>
 #include <errno.h>
 
@@ -94,14 +95,62 @@ bool aether_honr_should_relay(struct net_if *iface, const uint8_t resender[6],
  * -------------------------------------------------------------------------- */
 
 #define HONR_CHILD_MASK   0x7FFEU /* nibble values 1..14 (bit n = nibble n) */
-#define HONR_ANN_LEN      4U      /* addr(2) + free bitmap(2) */
+#define HONR_ANN_LEN      8U      /* addr(2) + free bitmap(2) + node id(4) */
 #define HONR_REQ_LEN      8U      /* joiner id(6) + target parent addr(2) */
 #define HONR_REP_LEN      8U      /* joiner id(6) + assigned addr(2) */
 #define HONR_JOIN_WAIT_MS 2000    /* await a join reply before retrying */
 
 static struct k_work_delayable honr_announce_work;
+static struct k_work_delayable honr_election_work;
 static struct net_if *honr_iface;
 static int64_t honr_join_pending_until;
+
+/* Stable per-node id used as the root-election tiebreak (lower wins). */
+static uint32_t honr_node_id;
+
+static uint32_t honr_election_delay_ms(void)
+{
+	return CONFIG_AETHER_HONR_ELECTION_BASE_MS +
+	       (honr_node_id % CONFIG_AETHER_HONR_ELECTION_JITTER_MS);
+}
+
+static void honr_become_root(struct aether_mesh_ctx *ctx)
+{
+	ctx->honr_addr = HONR_ROOT;
+	ctx->honr_joined = true;
+	ctx->honr_child_bitmap = 0;
+	ctx->local_addr[4] = 0;
+	ctx->local_addr[5] = 0;
+}
+
+/* Election timer: if no tree was heard during the listen window, claim root. */
+static void honr_election_handler(struct k_work *work)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	ARG_UNUSED(work);
+
+	if (ctx && !ctx->honr_joined) {
+		honr_become_root(ctx);
+		LOG_INF("HONR: no tree heard, self-elected root (id %08x)", honr_node_id);
+	}
+}
+
+/* Lost a root tiebreak: drop to unjoined and re-arm the election, so we join
+ * the winning root (now announcing) or re-elect if it disappears.
+ */
+static void honr_relinquish_root(void)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	ctx->honr_joined = false;
+	ctx->honr_addr = 0;
+	ctx->honr_child_bitmap = 0;
+	ctx->local_addr[4] = 0;
+	ctx->local_addr[5] = 0;
+	honr_join_pending_until = 0;
+	k_work_reschedule(&honr_election_work, K_MSEC(honr_election_delay_ms()));
+}
 
 static uint16_t honr_free_children(const struct aether_mesh_ctx *ctx)
 {
@@ -182,6 +231,8 @@ static void honr_announce_handler(struct k_work *work)
 		uint8_t p[HONR_ANN_LEN] = {
 			(uint8_t)(ctx->honr_addr >> 8), (uint8_t)(ctx->honr_addr & 0xFF),
 			(uint8_t)(freebits >> 8), (uint8_t)(freebits & 0xFF),
+			(uint8_t)(honr_node_id >> 24), (uint8_t)(honr_node_id >> 16),
+			(uint8_t)(honr_node_id >> 8), (uint8_t)(honr_node_id & 0xFF),
 		};
 
 		(void)honr_send_ctrl(honr_iface, AETHER_MSG_TREE_ANNOUNCE, p, sizeof(p));
@@ -199,22 +250,38 @@ void aether_honr_join_init(struct net_if *iface)
 		return;
 	}
 
+	uint8_t hwid[8];
+	ssize_t hlen;
+
 	honr_iface = iface;
 	ctx->honr_child_bitmap = 0;
 	honr_join_pending_until = 0;
 
-	if (IS_ENABLED(CONFIG_AETHER_HONR_ROOT)) {
-		ctx->honr_addr = HONR_ROOT;
-		ctx->honr_joined = true;
-		ctx->local_addr[4] = 0;
-		ctx->local_addr[5] = 0;
-		LOG_INF("HONR root: address 0000");
-	} else {
-		ctx->honr_joined = false;
-		LOG_INF("HONR node: awaiting tree join");
+	/* Stable per-node election id derived from the hardware id. */
+	honr_node_id = 0;
+	hlen = hwinfo_get_device_id(hwid, sizeof(hwid));
+	for (ssize_t i = 0; i < hlen; i++) {
+		honr_node_id = honr_node_id * 31U + hwid[i];
 	}
 
 	k_work_init_delayable(&honr_announce_work, honr_announce_handler);
+	k_work_init_delayable(&honr_election_work, honr_election_handler);
+
+	if (IS_ENABLED(CONFIG_AETHER_HONR_ROOT)) {
+		/* Optional override: pin this node as root, skipping the election. */
+		honr_become_root(ctx);
+		LOG_INF("HONR: forced root (address 0000)");
+	} else {
+		ctx->honr_joined = false;
+		/* Same firmware on every node: listen for an existing tree, and if
+		 * none is heard, self-elect. Lower node ids claim sooner, so they
+		 * tend to win uncontested.
+		 */
+		k_work_schedule(&honr_election_work, K_MSEC(honr_election_delay_ms()));
+		LOG_INF("HONR: id %08x, root election in %u ms unless a tree is heard",
+			honr_node_id, honr_election_delay_ms());
+	}
+
 	k_work_schedule(&honr_announce_work, K_SECONDS(2));
 }
 
@@ -232,18 +299,38 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 	switch (type) {
 	case AETHER_MSG_TREE_ANNOUNCE: {
 		uint16_t parent_addr, parent_free;
+		uint32_t peer_id;
 		uint8_t req[HONR_REQ_LEN];
 
-		if (ctx->honr_joined || len < HONR_ANN_LEN) {
+		if (len < HONR_ANN_LEN) {
+			break;
+		}
+		parent_addr = (uint16_t)((payload[0] << 8) | payload[1]);
+		parent_free = (uint16_t)((payload[2] << 8) | payload[3]);
+		peer_id = ((uint32_t)payload[4] << 24) | ((uint32_t)payload[5] << 16) |
+			  ((uint32_t)payload[6] << 8) | payload[7];
+
+		/* Dual-root resolution: if we are root and hear another root
+		 * (address 0x0000), the lower node id keeps it and the higher one
+		 * relinquishes and rejoins under the winner.
+		 */
+		if (ctx->honr_joined && honr_is_root(ctx->honr_addr) &&
+		    parent_addr == HONR_ROOT) {
+			if (peer_id < honr_node_id) {
+				LOG_WRN("HONR: yielding root to lower id %08x", peer_id);
+				honr_relinquish_root();
+			}
+			break;
+		}
+
+		/* Already joined (non-root): ignore further announcements. */
+		if (ctx->honr_joined) {
 			break;
 		}
 		/* Still awaiting a reply from a previous request. */
 		if (honr_join_pending_until != 0 && k_uptime_get() < honr_join_pending_until) {
 			break;
 		}
-
-		parent_addr = (uint16_t)((payload[0] << 8) | payload[1]);
-		parent_free = (uint16_t)((payload[2] << 8) | payload[3]);
 		if (parent_free == 0) {
 			break; /* parent has no room */
 		}

@@ -53,7 +53,8 @@ static int cmd_dect_stats(const struct shell *sh, size_t argc, char **argv)
 	shell_print(sh, "DECT NR+ PHY stats:");
 	shell_print(sh, "  tx   %u ok, %u busy (LBT), %u err",
 		    stats.tx_ok, stats.tx_busy, stats.tx_err);
-	shell_print(sh, "  rx   %u frames", stats.rx_frames);
+	shell_print(sh, "  rx   %u frames, %u pcc (control headers)",
+		    stats.rx_frames, stats.rx_pcc);
 	shell_print(sh, "  last rssi %d dBm, snr %d dB",
 		    stats.last_rssi_dbm, stats.last_snr_db);
 	return 0;

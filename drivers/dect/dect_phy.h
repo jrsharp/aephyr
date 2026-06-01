@@ -83,14 +83,27 @@ void dect_phy_set_tx_power(int8_t power);
 int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len);
 
 /**
- * @brief Open a continuous receive window, blocking until it elapses.
+ * @brief Ensure the radio is listening, arming a continuous receive if it is not.
  *
- * Decoded frames are delivered to the registered receive callback.
+ * Receive runs continuously in the background and is only interrupted to
+ * transmit (see @ref dect_phy_tx, which stops and resumes it automatically).
+ * The radio thread calls this periodically to re-arm receive after the
+ * operation's duration elapses. Decoded frames are delivered to the registered
+ * receive callback. Idempotent: a no-op while a receive is already live.
  *
- * @param duration_ms Receive window duration in milliseconds.
  * @retval 0 on success, negative errno otherwise.
  */
-int dect_phy_rx_window(uint32_t duration_ms);
+int dect_phy_rx_ensure(void);
+
+/**
+ * @brief Stop the continuous receive operation and wait for the radio to idle.
+ *
+ * Cancels any live receive so the radio is free to transmit or measure. Bounded
+ * wait; safe to call when no receive is active.
+ *
+ * @retval 0 on success, negative errno otherwise.
+ */
+int dect_phy_rx_stop(void);
 
 /**
  * @brief Measure peak channel RSSI over a short window (for CAD).
@@ -105,7 +118,8 @@ struct dect_phy_stats {
 	uint32_t tx_ok;       /**< Frames transmitted successfully. */
 	uint32_t tx_busy;     /**< Transmits skipped because LBT found the channel busy. */
 	uint32_t tx_err;      /**< Transmits that failed for other reasons. */
-	uint32_t rx_frames;   /**< Data frames received. */
+	uint32_t rx_pcc;      /**< Control headers (PCC) detected off-air. */
+	uint32_t rx_frames;   /**< Data frames (PDC) received. */
 	int16_t last_rssi_dbm; /**< RSSI of the most recently received frame, dBm. */
 	int8_t last_snr_db;    /**< SNR of the most recently received frame, dB. */
 };

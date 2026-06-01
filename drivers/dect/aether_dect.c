@@ -145,7 +145,11 @@ static void aether_dect_rx_thread(void *p1, void *p2, void *p3)
 	LOG_DBG("Æther DECT RX thread stopped");
 }
 
-/* Radio thread: drain queued transmissions, then open a receive window. */
+/* Radio thread: keep the radio listening continuously and transmit queued
+ * frames as they arrive, briefly interrupting receive for each. The receive
+ * operation is asynchronous (driven in the modem); the transmit path stops and
+ * resumes it, so the radio listens at all times except during an actual key-up.
+ */
 static void aether_dect_radio_thread(void *p1, void *p2, void *p3)
 {
 	struct aether_dect_ctx *ctx = (struct aether_dect_ctx *)p1;
@@ -159,63 +163,77 @@ static void aether_dect_radio_thread(void *p1, void *p2, void *p3)
 	LOG_DBG("Æther DECT radio thread started");
 
 	while (ctx->running) {
-		/* Transmit a queued frame, unless TX is paused. */
-		if (!atomic_get(&tx_paused) &&
-		    k_msgq_get(&ctx->tx_msgq, &pkt, K_NO_WAIT) == 0) {
-			if (!pkt) {
-				continue;
-			}
-
-			len = net_pkt_get_len(pkt);
-			if (len == 0 || len > sizeof(tx_frame_buf)) {
-				LOG_ERR("Invalid TX length: %zu", len);
-				net_pkt_unref(pkt);
-				continue;
-			}
-
-			net_pkt_cursor_init(pkt);
-			if (net_pkt_read(pkt, tx_frame_buf, len) < 0) {
-				LOG_ERR("Failed to read TX packet");
-				net_pkt_unref(pkt);
-				continue;
-			}
-
-			/* A 2-byte link-layer destination (set by the mesh layer for
-			 * HONR unicast hops) becomes the PHY receiver id; otherwise
-			 * the frame is broadcast. */
-			uint16_t rx_id = DECT_PHY_BROADCAST_ID;
-			struct net_linkaddr *ll = net_pkt_lladdr_dst(pkt);
-
-			if (ll->len >= 2) {
-				rx_id = (uint16_t)((ll->addr[0] << 8) | ll->addr[1]);
-			}
-
-			ret = aether_dect_radio_tx(ctx, tx_frame_buf, len, rx_id,
-						   CONFIG_AETHER_DECT_CAD_MAX_RETRIES);
-			if (ret == 0) {
-				LOG_DBG("DECT TX ok, len=%zu", len);
-			} else {
-				LOG_WRN("DECT TX failed: %d", ret);
-			}
-
-			net_pkt_unref(pkt);
-			/* Drain any further queued frames before listening. */
-			continue;
-		}
-
-		/* Nothing to send: listen for a bounded window. */
 #if defined(CONFIG_AETHER_ROUTING_HONR)
-		/* Track the HONR identity so the modem hardware-filters to it
-		 * (0 while unjoined keeps RX promiscuous for the tree join).
+		/* Track the HONR identity so receive hardware-filters to it once
+		 * joined (0 while unjoined keeps RX promiscuous for the tree join).
+		 * Takes effect on the next receive re-arm.
 		 */
 		if (g_mesh_ctx) {
 			dect_phy_set_node_id(g_mesh_ctx->honr_joined ?
 					     g_mesh_ctx->honr_addr : 0);
 		}
 #endif
+
+		/* Keep the radio listening. A no-op while a receive is already
+		 * live; re-arms once the previous operation's duration elapsed.
+		 */
 		k_mutex_lock(&ctx->radio_lock, K_FOREVER);
-		dect_phy_rx_window(CONFIG_AETHER_DECT_RX_WINDOW_MS);
+		dect_phy_rx_ensure();
 		k_mutex_unlock(&ctx->radio_lock);
+
+		/* While TX is paused (e.g. a 9P response wait), stay in receive and
+		 * don't dequeue. Sleep so the receive operation keeps running.
+		 */
+		if (atomic_get(&tx_paused)) {
+			k_msleep(CONFIG_AETHER_DECT_RX_WINDOW_MS);
+			continue;
+		}
+
+		/* Wait for a frame to send. A queued frame wakes us immediately; on
+		 * timeout we loop to re-arm receive after its duration elapses. The
+		 * radio is receiving the entire time we block here.
+		 */
+		if (k_msgq_get(&ctx->tx_msgq, &pkt, K_MSEC(CONFIG_AETHER_DECT_RX_WINDOW_MS)) != 0) {
+			continue;
+		}
+		if (!pkt) {
+			continue;
+		}
+
+		len = net_pkt_get_len(pkt);
+		if (len == 0 || len > sizeof(tx_frame_buf)) {
+			LOG_ERR("Invalid TX length: %zu", len);
+			net_pkt_unref(pkt);
+			continue;
+		}
+
+		net_pkt_cursor_init(pkt);
+		if (net_pkt_read(pkt, tx_frame_buf, len) < 0) {
+			LOG_ERR("Failed to read TX packet");
+			net_pkt_unref(pkt);
+			continue;
+		}
+
+		/* A 2-byte link-layer destination (set by the mesh layer for HONR
+		 * unicast hops) becomes the PHY receiver id; else the frame is
+		 * broadcast. The transmit stops and resumes receive internally.
+		 */
+		uint16_t rx_id = DECT_PHY_BROADCAST_ID;
+		struct net_linkaddr *ll = net_pkt_lladdr_dst(pkt);
+
+		if (ll->len >= 2) {
+			rx_id = (uint16_t)((ll->addr[0] << 8) | ll->addr[1]);
+		}
+
+		ret = aether_dect_radio_tx(ctx, tx_frame_buf, len, rx_id,
+					   CONFIG_AETHER_DECT_CAD_MAX_RETRIES);
+		if (ret == 0) {
+			LOG_DBG("DECT TX ok, len=%zu", len);
+		} else {
+			LOG_WRN("DECT TX failed: %d", ret);
+		}
+
+		net_pkt_unref(pkt);
 	}
 
 	LOG_DBG("Æther DECT radio thread stopped");

@@ -52,8 +52,20 @@ BUILD_ASSERT(sizeof(union nrf_modem_dect_phy_hdr) >= sizeof(struct phy_ctrl_fiel
 BUILD_ASSERT(sizeof(((union nrf_modem_dect_phy_hdr *)0)->type_2) == 10,
 	     "unexpected DECT NR+ Type 2 header size");
 
-/* Synchronizes blocking calls with their modem completion event. */
+/* Synchronizes blocking calls (init/configure/activate, TX, RSSI) with their
+ * modem completion event. Receive is asynchronous (see rx_done_sem) so it does
+ * not contend on this.
+ */
 static K_SEM_DEFINE(operation_sem, 0, 1);
+
+/* Receive runs continuously and is only interrupted to transmit. rx_armed
+ * tracks whether an RX operation is live in the modem; rx_done_sem is released
+ * when that operation completes (its duration elapsed) or is canceled, so the
+ * transmit path can wait for the radio to free up before keying up. rx_armed
+ * is touched from both thread and modem-event context, hence volatile.
+ */
+static K_SEM_DEFINE(rx_done_sem, 0, 1);
+static volatile bool rx_armed;
 
 static uint16_t phy_device_id;
 static uint64_t modem_time;
@@ -128,13 +140,25 @@ static void on_activate(const struct nrf_modem_dect_phy_activate_event *evt)
 
 static void on_op_complete(const struct nrf_modem_dect_phy_op_complete_event *evt)
 {
-	last_op_err = evt->err;
 	LOG_DBG("op_complete handle %u status %d", evt->handle, evt->err);
+
+	if (evt->handle == DECT_PHY_RX_HANDLE) {
+		/* The continuous receive operation ended (duration elapsed or
+		 * canceled to make way for a transmit). Free the radio.
+		 */
+		rx_armed = false;
+		k_sem_give(&rx_done_sem);
+		return;
+	}
+
+	/* Synchronous operations (TX, RSSI): hand the result to the waiter. */
+	last_op_err = evt->err;
 	k_sem_give(&operation_sem);
 }
 
 static void on_pcc(const struct nrf_modem_dect_phy_pcc_event *evt)
 {
+	stats.rx_pcc++;
 	last_pcc_tx_id = (uint16_t)(evt->hdr.hdr_type_1.transmitter_id_hi << 8 |
 				    evt->hdr.hdr_type_1.transmitter_id_lo);
 }
@@ -192,7 +216,9 @@ static void dect_phy_event_handler(const struct nrf_modem_dect_phy_event *evt)
 		on_op_complete(&evt->op_complete);
 		break;
 	case NRF_MODEM_DECT_PHY_EVT_CANCELED:
-		k_sem_give(&operation_sem);
+		/* Only the continuous receive operation is ever canceled. */
+		rx_armed = false;
+		k_sem_give(&rx_done_sem);
 		break;
 	case NRF_MODEM_DECT_PHY_EVT_PCC:
 		on_pcc(&evt->pcc);
@@ -295,9 +321,15 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 	union nrf_modem_dect_phy_hdr phdr;
 	int err;
 
+	/* Use an addressed Type 2 header only for unicast (a specific receiver);
+	 * broadcast frames (hellos, tree announcements) go out as a Type 1
+	 * broadcast header so every node receives them regardless of identity.
+	 */
+	bool addressed = node_id_set && (receiver_id != DECT_PHY_BROADCAST_ID);
+
 	memset(&phdr, 0, sizeof(phdr));
 
-	if (node_id_set) {
+	if (addressed) {
 		/* Addressed Type 2 header: lets receivers filter in hardware. */
 		phdr.hdr_type_2.packet_length = CONFIG_AETHER_DECT_PACKET_LENGTH;
 		phdr.hdr_type_2.packet_length_type = 0;
@@ -328,7 +360,7 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 		.start_time = 0,
 		.handle = DECT_PHY_TX_HANDLE,
 		.network_id = CONFIG_AETHER_DECT_NETWORK_ID,
-		.phy_type = node_id_set ? 1 : 0, /* 0 = Type 1, 1 = Type 2 */
+		.phy_type = addressed ? 1 : 0, /* 0 = Type 1, 1 = Type 2 */
 #ifdef CONFIG_AETHER_DECT_LBT_ENABLED
 		.lbt_rssi_threshold_max = CONFIG_AETHER_DECT_LBT_THRESHOLD_DBM,
 		.lbt_period = NRF_MODEM_DECT_LBT_PERIOD_MAX,
@@ -342,9 +374,22 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 		.data_size = len,
 	};
 
+	/* Half-duplex radio: free it from continuous receive before keying up,
+	 * then resume listening once the transmission resolves.
+	 */
+	bool resume = rx_armed;
+	int result;
+
+	if (resume) {
+		dect_phy_rx_stop();
+	}
+
 	err = nrf_modem_dect_phy_tx(&tx);
 	if (err) {
 		LOG_WRN("dect_phy_tx submit failed, err %d", err);
+		if (resume) {
+			dect_phy_rx_ensure();
+		}
 		return err;
 	}
 
@@ -355,19 +400,29 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 		 * upper layers already back off and retry on.
 		 */
 		stats.tx_busy++;
-		return -EBUSY;
-	}
-	if (last_op_err != NRF_MODEM_DECT_PHY_SUCCESS) {
+		result = -EBUSY;
+	} else if (last_op_err != NRF_MODEM_DECT_PHY_SUCCESS) {
 		LOG_WRN("TX completed with err %d", last_op_err);
 		stats.tx_err++;
-		return -EIO;
+		result = -EIO;
+	} else {
+		stats.tx_ok++;
+		result = 0;
 	}
 
-	stats.tx_ok++;
-	return 0;
+	if (resume) {
+		dect_phy_rx_ensure();
+	}
+	return result;
 }
 
-int dect_phy_rx_window(uint32_t duration_ms)
+/* Submit a continuous receive operation. Returns without blocking: decoded
+ * frames flow to the receive callback, and the operation completes (then the
+ * radio thread re-arms it via dect_phy_rx_ensure) when its duration elapses or
+ * it is canceled to transmit. Each re-arm re-reads the carrier and node-id
+ * filter, so a HONR join takes effect on the next cycle.
+ */
+static int rx_submit(void)
 {
 	int err;
 
@@ -380,7 +435,7 @@ int dect_phy_rx_window(uint32_t duration_ms)
 		.link_id = NRF_MODEM_DECT_PHY_LINK_UNSPECIFIED,
 		.rssi_level = -60,
 		.carrier = cfg_carrier,
-		.duration = (uint64_t)duration_ms *
+		.duration = (uint64_t)CONFIG_AETHER_DECT_RX_WINDOW_MS *
 			    NRF_MODEM_DECT_MODEM_TIME_TICK_RATE_KHZ,
 		.filter.short_network_id = CONFIG_AETHER_DECT_NETWORK_ID & 0xff,
 		.filter.is_short_network_id_used = 1,
@@ -396,7 +451,32 @@ int dect_phy_rx_window(uint32_t duration_ms)
 		return err;
 	}
 
-	k_sem_take(&operation_sem, K_FOREVER);
+	rx_armed = true;
+	return 0;
+}
+
+int dect_phy_rx_ensure(void)
+{
+	if (rx_armed) {
+		return 0;
+	}
+	return rx_submit();
+}
+
+int dect_phy_rx_stop(void)
+{
+	if (!rx_armed) {
+		return 0;
+	}
+
+	/* Cancel the live receive and wait for its completion event so the radio
+	 * is idle before we transmit. The wait is bounded: if the operation
+	 * already ended on its own, the cancel is a no-op with nothing to wait on.
+	 */
+	k_sem_reset(&rx_done_sem);
+	(void)nrf_modem_dect_phy_cancel(DECT_PHY_RX_HANDLE);
+	(void)k_sem_take(&rx_done_sem, K_MSEC(200));
+	rx_armed = false;
 	return 0;
 }
 
@@ -414,13 +494,27 @@ int dect_phy_channel_rssi(int8_t *rssi_dbm_out)
 
 	last_rssi_peak = INT8_MIN;
 
+	/* Free the radio from continuous receive for the measurement, then resume. */
+	bool resume = rx_armed;
+
+	if (resume) {
+		dect_phy_rx_stop();
+	}
+
 	err = nrf_modem_dect_phy_rssi(&params);
 	if (err) {
 		LOG_WRN("dect_phy_rssi submit failed, err %d", err);
+		if (resume) {
+			dect_phy_rx_ensure();
+		}
 		return err;
 	}
 
 	k_sem_take(&operation_sem, K_FOREVER);
+
+	if (resume) {
+		dect_phy_rx_ensure();
+	}
 
 	if (rssi_dbm_out != NULL) {
 		*rssi_dbm_out = last_rssi_peak;

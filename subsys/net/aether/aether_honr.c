@@ -99,19 +99,50 @@ bool aether_honr_should_relay(struct net_if *iface, const uint8_t resender[6],
 #define HONR_REQ_LEN      8U      /* joiner id(6) + target parent addr(2) */
 #define HONR_REP_LEN      8U      /* joiner id(6) + assigned addr(2) */
 #define HONR_JOIN_WAIT_MS 2000    /* await a join reply before retrying */
+#define HONR_JOIN_COLLECT_MS 2000 /* listen this long for a shallower parent first */
+#define HONR_PARENT_MISS_MAX 3U   /* orphan after this many missed parent announces */
 
 static struct k_work_delayable honr_announce_work;
 static struct k_work_delayable honr_election_work;
+static struct k_work_delayable honr_join_decide_work;
 static struct net_if *honr_iface;
 static int64_t honr_join_pending_until;
 
+/* Liveness of the parent: a non-root node that stops hearing its parent's
+ * announcements has lost the tree above it; it relinquishes and re-elects so a
+ * rooted tree re-forms (the lowest-id survivor becomes the new root).
+ */
+static int64_t honr_parent_last_heard;
+
+/* Shallowest parent heard during the join collection window (lower rank = closer
+ * to the root). Committed to by honr_join_decide_handler when the window elapses,
+ * so a node attaches near the root instead of to whichever parent it heard first.
+ */
+static uint16_t honr_cand_parent;
+static uint8_t honr_cand_rank;
+static bool honr_cand_valid;
+
 /* Stable per-node id used as the root-election tiebreak (lower wins). */
 static uint32_t honr_node_id;
+
+uint32_t aether_honr_node_id(void)
+{
+	return honr_node_id;
+}
 
 static uint32_t honr_election_delay_ms(void)
 {
 	return CONFIG_AETHER_HONR_ELECTION_BASE_MS +
 	       (honr_node_id % CONFIG_AETHER_HONR_ELECTION_JITTER_MS);
+}
+
+/* How long a non-root node tolerates silence from its parent before declaring
+ * itself orphaned (a multiple of the announce interval).
+ */
+static int64_t honr_parent_timeout_ms(void)
+{
+	return (int64_t)CONFIG_AETHER_HONR_ANNOUNCE_INTERVAL_SECONDS * 1000 *
+	       HONR_PARENT_MISS_MAX;
 }
 
 static void honr_become_root(struct aether_mesh_ctx *ctx)
@@ -149,6 +180,7 @@ static void honr_relinquish_root(void)
 	ctx->local_addr[4] = 0;
 	ctx->local_addr[5] = 0;
 	honr_join_pending_until = 0;
+	honr_cand_valid = false;
 	k_work_reschedule(&honr_election_work, K_MSEC(honr_election_delay_ms()));
 }
 
@@ -226,7 +258,16 @@ static void honr_announce_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	if (ctx && ctx->honr_joined) {
+	/* Root-loss detection: a non-root node that has not heard its parent for
+	 * several announce intervals has lost the tree above it. Relinquish and
+	 * re-elect; with shallowest-parent join the mesh re-forms a rooted tree.
+	 */
+	if (ctx && ctx->honr_joined && !honr_is_root(ctx->honr_addr) &&
+	    (k_uptime_get() - honr_parent_last_heard) > honr_parent_timeout_ms()) {
+		LOG_WRN("HONR: parent %04x silent, orphaned - relinquishing to re-elect",
+			honr_parent(ctx->honr_addr));
+		honr_relinquish_root();
+	} else if (ctx && ctx->honr_joined) {
 		uint16_t freebits = honr_free_children(ctx);
 		uint8_t p[HONR_ANN_LEN] = {
 			(uint8_t)(ctx->honr_addr >> 8), (uint8_t)(ctx->honr_addr & 0xFF),
@@ -240,6 +281,32 @@ static void honr_announce_handler(struct k_work *work)
 
 	k_work_reschedule(&honr_announce_work,
 			  K_SECONDS(CONFIG_AETHER_HONR_ANNOUNCE_INTERVAL_SECONDS));
+}
+
+/* Commit the join: request an address from the shallowest parent heard during
+ * the collection window (closest to the root keeps the tree flat).
+ */
+static void honr_join_decide_handler(struct k_work *work)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	uint8_t req[HONR_REQ_LEN];
+
+	ARG_UNUSED(work);
+
+	if (!ctx || ctx->honr_joined || !honr_cand_valid) {
+		honr_cand_valid = false;
+		return;
+	}
+
+	memcpy(req, ctx->local_addr, 6); /* joiner id */
+	req[6] = (uint8_t)(honr_cand_parent >> 8);
+	req[7] = (uint8_t)(honr_cand_parent & 0xFF);
+	if (honr_send_ctrl(honr_iface, AETHER_MSG_TREE_JOIN_REQ, req, sizeof(req)) == 0) {
+		honr_join_pending_until = k_uptime_get() + HONR_JOIN_WAIT_MS;
+		LOG_INF("HONR join: requesting address from shallowest parent %04x (rank %u)",
+			honr_cand_parent, honr_cand_rank);
+	}
+	honr_cand_valid = false;
 }
 
 void aether_honr_join_init(struct net_if *iface)
@@ -264,8 +331,10 @@ void aether_honr_join_init(struct net_if *iface)
 		honr_node_id = honr_node_id * 31U + hwid[i];
 	}
 
+	honr_cand_valid = false;
 	k_work_init_delayable(&honr_announce_work, honr_announce_handler);
 	k_work_init_delayable(&honr_election_work, honr_election_handler);
+	k_work_init_delayable(&honr_join_decide_work, honr_join_decide_handler);
 
 	if (IS_ENABLED(CONFIG_AETHER_HONR_ROOT)) {
 		/* Optional override: pin this node as root, skipping the election. */
@@ -300,6 +369,7 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 	case AETHER_MSG_TREE_ANNOUNCE: {
 		uint16_t parent_addr, parent_free;
 		uint32_t peer_id;
+		uint8_t parent_rank;
 		uint8_t req[HONR_REQ_LEN];
 
 		if (len < HONR_ANN_LEN) {
@@ -323,28 +393,68 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 			break;
 		}
 
-		/* Already joined (non-root): ignore further announcements. */
-		if (ctx->honr_joined) {
+		/* Refresh parent liveness from its announcement (even if it is now
+		 * full or we are not joining), so a healthy parent never trips the
+		 * root-loss detector.
+		 */
+		if (ctx->honr_joined && !honr_is_root(ctx->honr_addr) &&
+		    parent_addr == honr_parent(ctx->honr_addr)) {
+			honr_parent_last_heard = k_uptime_get();
+		}
+
+		/* A parent with no room or a malformed address is no use either to
+		 * join or to re-parent under.
+		 */
+		if (parent_free == 0 || !honr_is_valid_node(parent_addr)) {
 			break;
 		}
-		/* Still awaiting a reply from a previous request. */
+		parent_rank = honr_rank(parent_addr);
+
+		if (ctx->honr_joined) {
+			/* Re-parent up: a childless, non-root node that hears a
+			 * strictly-shallower parent migrates under it, flattening
+			 * the tree toward the root over successive announcements.
+			 * Restricted to childless nodes so no subtree is orphaned.
+			 */
+			bool busy = honr_join_pending_until != 0 &&
+				    k_uptime_get() < honr_join_pending_until;
+
+			if (!honr_is_root(ctx->honr_addr) && ctx->honr_child_bitmap == 0 &&
+			    !busy && (uint8_t)(parent_rank + 1U) < honr_rank(ctx->honr_addr)) {
+				LOG_INF("HONR: re-parenting under %04x (rank %u), was %04x (rank %u)",
+					parent_addr, parent_rank, ctx->honr_addr,
+					honr_rank(ctx->honr_addr));
+				ctx->honr_joined = false; /* keep local_addr as joiner id */
+				honr_cand_valid = false;
+				memcpy(req, ctx->local_addr, 6);
+				req[6] = (uint8_t)(parent_addr >> 8);
+				req[7] = (uint8_t)(parent_addr & 0xFF);
+				if (honr_send_ctrl(iface, AETHER_MSG_TREE_JOIN_REQ, req,
+						   sizeof(req)) == 0) {
+					honr_join_pending_until =
+						k_uptime_get() + HONR_JOIN_WAIT_MS;
+				}
+			}
+			break;
+		}
+
+		/* Unjoined and still awaiting a reply from a previous request. */
 		if (honr_join_pending_until != 0 && k_uptime_get() < honr_join_pending_until) {
 			break;
 		}
-		if (parent_free == 0) {
-			break; /* parent has no room */
-		}
-		if (!honr_is_valid_node(parent_addr)) {
-			break; /* ignore an announcement with a malformed address */
-		}
 
-		/* Request an address from this parent (id + chosen parent). */
-		memcpy(req, ctx->local_addr, 6);
-		req[6] = (uint8_t)(parent_addr >> 8);
-		req[7] = (uint8_t)(parent_addr & 0xFF);
-		if (honr_send_ctrl(iface, AETHER_MSG_TREE_JOIN_REQ, req, sizeof(req)) == 0) {
-			honr_join_pending_until = k_uptime_get() + HONR_JOIN_WAIT_MS;
-			LOG_INF("HONR join: requesting address from parent %04x", parent_addr);
+		/* Otherwise collect the shallowest parent over a short window and
+		 * commit in honr_join_decide_handler, so we attach near the root
+		 * rather than to whichever parent we happened to hear first.
+		 */
+		if (!honr_cand_valid || parent_rank < honr_cand_rank) {
+			honr_cand_parent = parent_addr;
+			honr_cand_rank = parent_rank;
+			if (!honr_cand_valid) {
+				honr_cand_valid = true;
+				k_work_reschedule(&honr_join_decide_work,
+						  K_MSEC(HONR_JOIN_COLLECT_MS));
+			}
 		}
 		break;
 	}
@@ -399,6 +509,7 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 		ctx->honr_joined = true;
 		ctx->honr_child_bitmap = 0;
 		honr_join_pending_until = 0;
+		honr_parent_last_heard = k_uptime_get(); /* start the liveness clock */
 		LOG_INF("HONR joined: address %04x (rank %u)", assigned, honr_rank(assigned));
 		break;
 	}

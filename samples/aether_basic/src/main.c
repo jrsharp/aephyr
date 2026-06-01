@@ -8,6 +8,7 @@
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/heymac.h>
 #include <zephyr/net/aether_mesh.h>
+#include <zephyr/net/honr.h>
 #include <zephyr/logging/log.h>
 #include <zephyr/shell/shell.h>
 
@@ -402,9 +403,69 @@ static int cmd_aether_chat(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+/* Consolidated view of this node's place in the HONR tree: its address, depth
+ * (rank), parent, and the children it has handed addresses to. Run it on every
+ * node to assemble the whole tree by hand.
+ */
+static int cmd_aether_tree(const struct shell *sh, size_t argc, char **argv)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	uint16_t addr;
+	uint8_t rank;
+	int children = 0;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	if (!aether_iface || !ctx) {
+		shell_error(sh, "Æther interface not available");
+		return -ENODEV;
+	}
+
+	addr = ctx->honr_addr;
+	rank = honr_rank(addr);
+
+	shell_print(sh, "=== HONR Tree (local view) ===");
+	shell_print(sh, "  node     %04x  rank %u (depth)  %s", addr, rank,
+		    honr_is_root(addr) ? "ROOT" :
+		    (ctx->honr_joined ? "joined" : "unjoined"));
+	shell_print(sh, "  node_id  %08x  (lowest id wins the root election)",
+		    aether_honr_node_id());
+
+	if (honr_is_root(addr)) {
+		shell_print(sh, "  parent   (none - root)");
+	} else if (ctx->honr_joined) {
+		shell_print(sh, "  parent   %04x", honr_parent(addr));
+	} else {
+		shell_print(sh, "  parent   (none - not joined yet)");
+	}
+
+	for (unsigned int n = HONR_CHILD_MIN; n <= HONR_CHILD_MAX; n++) {
+		if (ctx->honr_child_bitmap & BIT(n)) {
+			shell_print(sh, "  child    %04x",
+				    honr_set_nibble(addr, rank, (uint8_t)n));
+			children++;
+		}
+	}
+	if (children == 0) {
+		shell_print(sh, "  children (none)");
+	} else {
+		shell_print(sh, "  children %d of %d slots used", children,
+			    (int)(HONR_CHILD_MAX - HONR_CHILD_MIN + 1));
+	}
+
+	return 0;
+}
+#endif /* CONFIG_AETHER_ROUTING_HONR */
+
 SHELL_STATIC_SUBCMD_SET_CREATE(aether_cmds,
 	SHELL_CMD_ARG(info, NULL, "Show Æther parameters and MAC state", cmd_aether_info, 1, 0),
 	SHELL_CMD_ARG(status, NULL, "Show Æther node status", cmd_aether_status, 1, 0),
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+	SHELL_CMD_ARG(tree, NULL, "Show HONR tree position (parent/children/rank)",
+		      cmd_aether_tree, 1, 0),
+#endif
 	SHELL_CMD_ARG(hello, NULL, "Send hello message", cmd_aether_hello, 1, 0),
 	SHELL_CMD_ARG(chat, NULL, "Broadcast a party-line message", cmd_aether_chat, 2, 20),
 	SHELL_CMD_ARG(send, NULL, "Send mesh message to <addr>", cmd_aether_send, 3, 0),

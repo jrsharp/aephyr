@@ -352,6 +352,9 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries);
 /** @brief Extract the 16-bit HONR address from a 6-byte mesh address. */
 uint16_t aether_honr_addr16(const uint8_t addr6[6]);
 
+/** @brief This node's HONR election id (hwid-derived; lowest id wins the root election). */
+uint32_t aether_honr_node_id(void);
+
 /**
  * @brief Compute the next-hop (6-byte) toward @p dst using HONR tree routing.
  * @return 0 on success; -EALREADY if this node is already @p dst.

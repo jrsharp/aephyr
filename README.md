@@ -33,6 +33,69 @@ The Æther Stack provides:
 - 1% duty cycle compliance for regulatory limits
 - Optimized for low-power, long-range communication
 
+## DECT NR+ Port (nRF9151 / Thingy:91 X)
+
+Beyond the original LoRa target, the Æther/HeyMac stack has been ported to
+**DECT NR+** ("non-cellular 5G") on Nordic's nRF9151 SiP, running directly on the
+bare DECT PHY via the `nrf_modem_dect_phy` API. The mesh layer is unchanged; a
+parallel net-device driver (`drivers/dect/`) replaces the LoRa PHY, and **HONR16**
+structured tree routing (`subsys/net/aether/aether_honr.c`) provides
+self-organizing, stateless multi-hop addressing — runtime root election, smarter
+(shallowest-parent) join, and root-loss self-healing, so identical firmware on
+every node converges to a rooted tree on its own. See
+[docs/DECT_HONR_ROUTING.md](docs/DECT_HONR_ROUTING.md).
+
+Build (requires the licensed DECT NR+ PHY modem firmware, obtained from Nordic Sales):
+
+```bash
+west build -b nrf9151dk/nrf9151/ns samples/aether_basic -- -DCONF_FILE=prj_dect.conf
+```
+
+### ⚠️ Regulatory & RF compliance — read before transmitting
+
+DECT NR+ operates on **regulated** (though licence-exempt) spectrum, *not* a
+general ISM band. **Operating these devices on-air is your responsibility, at the
+development site and in any deployment region.**
+
+**Band / spectrum.** `CONFIG_AETHER_DECT_CARRIER` selects an absolute DECT channel
+number; the modem firmware restricts operation to DECT bands 1/2/3/4/9/22, all in
+the ~1.9 GHz DECT allocation. Common settings:
+- `1677` = band 1 = **1880–1900 MHz** (EU; channels per **ETSI EN 301 406‑2**, table 4.3.2.3‑2).
+- `1711` = band 9 = **1920–1930 MHz** (US/Canada; the UPCS band under **47 CFR §15.323** — the same spectrum US DECT 6.0 cordless phones use).
+
+You have channel-level control *within* the allowed band only (≈5–6 channels in US
+band 9 at 1.728 MHz spacing); you cannot operate off-band or at an arbitrary
+frequency. (Band 4 is further restricted to carriers 525–551 to avoid LTE.)
+
+**Power.** The US limit is lower than the EU's (~10 dBm vs ~19 dBm). This build
+defaults conservatively (`CONFIG_AETHER_DECT_TX_POWER=10`); verify EIRP including
+antenna gain against the applicable rule.
+
+**Channel access / "duty cycle".** The DECT band uses a TDMA frame plus a
+listen-before-talk **channel-access etiquette**, not a fixed percentage duty-cycle
+cap. LBT is implemented (`CONFIG_AETHER_DECT_LBT_*`). Actual airtime is light here
+(tree announce ~5 s, hello ~30 s, chat on demand — each a single short slot, well
+under 1% per node); continuous receive is unregulated.
+
+**Compliance status.** This is a **research / development** stack intended for use
+on development kits:
+- It runs a **custom MAC** (HeyMac/HONR) directly on the DECT PHY. DECT NR+
+  certification requires the *standard DECT MAC*, so this is **not a certifiable
+  DECT NR+ product** and must not be marketed or sold as one.
+- The LBT is a good-faith implementation, not a verified §15.323 access etiquette.
+- If you cannot ensure local access rules are met, operate only inside an RF chamber.
+
+**Amateur radio.** 1.9 GHz DECT is **not** an amateur allocation, and the nRF9151
+DECT modem is band-locked to the DECT bands, so an amateur licence grants no extra
+privileges here. (A forthcoming Nordic nRF9151 variant runs DECT NR+ on
+**902–928 MHz**, which *is* a secondary amateur allocation — that part, not this
+1.9 GHz hardware, is where Part 97 latitude could apply.)
+
+> **Not legal advice.** Confirm against the current text of 47 CFR §15.323 / ETSI
+> EN 301 406‑2 and your local regulator; for any product, engage an FCC TCB or
+> compliance lab. Certification of a DECT NR+ end product also requires a
+> compliant MAC, which this research stack deliberately does not implement.
+
 ## Quick Start
 
 ### 1. Add to Your Zephyr Project

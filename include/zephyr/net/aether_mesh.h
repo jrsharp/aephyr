@@ -38,6 +38,13 @@ extern "C" {
 #define AETHER_DELIV_BESTEFFORT 0
 #define AETHER_DELIV_RELIABLE   1
 
+/* qos_security layout: Priority(2) | Delivery(1) | Security(4) | Reserved(1).
+ * The reserved low bit carries the reliable-datagram flow-start marker
+ * (§4.6): set on the first segment of a fresh per-peer sequence space. */
+#define AETHER_QOS_FLOW_START       0x01
+#define AETHER_QOS_IS_RELIABLE(q)   (((q) >> 5) & 0x01)
+#define AETHER_QOS_IS_FLOW_START(q) ((q) & AETHER_QOS_FLOW_START)
+
 /* Security Flags */
 #define AETHER_SEC_FLAG_NONE      0x00
 #define AETHER_SEC_FLAG_SIGNED    0x01
@@ -363,6 +370,29 @@ void aether_lora_tx_resume(void);
  * @return 0 on success, negative if driver not running
  */
 int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err);
+
+/* ---- Reliable-datagram glue (§4.6).  Defined in aether_route.c, which
+ * drives the pure aether_reliable engine and provides its net_pkt I/O. ---- */
+
+/** Send a unicast reliable datagram via the §4.6 ARQ engine (ordered,
+ *  acknowledged, retransmitted). The path /net/aether reliable conversations
+ *  use. Returns 0, -EAGAIN if the peer window is full, or an error. */
+int aether_mesh_reliable_send(struct net_if *iface, const uint8_t dst[6],
+			      const uint8_t *data, size_t len);
+
+/** Initialize the reliable engine + its periodic tick.  Call once after the
+ *  mesh context is up (g_mesh_ctx set). */
+void aether_reliable_glue_init(void);
+
+/** Feed a received reliable DATA segment (already stripped of the mesh
+ *  header) into the engine.  flow_start is the decoded qos flow-start bit. */
+void aether_reliable_glue_rx_data(const uint8_t src[6], uint8_t seq,
+				  bool flow_start, const uint8_t *payload,
+				  uint16_t len);
+
+/** Feed a received ACK (type 0x01) payload into the engine. */
+void aether_reliable_glue_rx_ack(const uint8_t src[6],
+				 const uint8_t *ack_bytes, uint16_t len);
 
 #ifdef __cplusplus
 }

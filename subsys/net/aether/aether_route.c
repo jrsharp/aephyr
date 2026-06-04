@@ -14,6 +14,7 @@ LOG_MODULE_REGISTER(aether_route, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/net/heymac.h>
 #endif
 #include <zephyr/net/aether_mesh.h>
+#include <zephyr/net/aether_reliable.h>
 #include <string.h>
 
 #ifndef CONFIG_NET_L2_HEYMAC
@@ -28,9 +29,8 @@ static inline uint16_t aether_route_get_network_id_fallback(struct net_if *iface
 /* External reference to global mesh context */
 extern struct aether_mesh_ctx *g_mesh_ctx;
 
-/* Static buffers for reliable send - moved to file scope for PSRAM placement.
- * Sends are serialized so a single buffer is safe.
- * Frame = HeyMac hdr (~7) + Mesh hdr (~20) + payload (up to MAX_PAYLOAD). */
+/* Static frame buffer for the legacy synchronous reliable send (modem-level
+ * retries). Sends are serialized so a single buffer is safe. */
 #ifdef CONFIG_ESP_SPIRAM
 static uint8_t frame_buf[CONFIG_AETHER_MAX_PAYLOAD + 32]
 	__attribute__((section(".ext_ram.bss")));
@@ -359,6 +359,211 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 }
 
 /* Reliable mesh send with synchronous TX and retries */
+/* ===================================================================
+ * Reliable-datagram glue (AETHER_PROTOCOL_SPEC §4.6)
+ *
+ * Drives the pure aether_reliable engine: the engine owns the ARQ state
+ * machine and calls back here to put bytes on the wire; this side builds the
+ * mesh frames, ticks the engine from the mesh workqueue, and feeds it RX.
+ * The engine state is large (per-peer TX+RX buffers) — kept in PSRAM on the
+ * deck so it doesn't pressure DRAM.
+ * =================================================================== */
+
+#ifdef CONFIG_ESP_SPIRAM
+static struct aether_reliable_ctx g_arq __attribute__((section(".ext_ram.bss")));
+#else
+static struct aether_reliable_ctx g_arq;
+#endif
+static struct k_work_delayable arq_tick_work;
+#define ARQ_TICK_MS 100
+
+/* Build and queue one mesh frame with explicit type/qos/seq (the engine,
+ * not ctx->seq_no, owns the reliable sequence). Mirrors aether_mesh_send's
+ * frame construction. */
+static int arq_tx_frame(const uint8_t dst[6], uint8_t type, uint8_t qos,
+			uint8_t seq, const uint8_t *data, uint16_t len)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	struct aether_mesh_hdr hdr;
+	struct net_pkt *pkt;
+	uint8_t hdr_buf[32];
+	uint8_t next_hop[6];
+	int hdr_len, ret;
+
+	if (!ctx) {
+		return -EINVAL;
+	}
+
+	static const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	bool is_bcast = (memcmp(dst, bcast, 6) == 0);
+	if (!is_bcast) {
+		ret = aether_mesh_find_route(ctx->iface, dst, next_hop);
+		if (ret < 0) {
+			/* No route yet — kick discovery; the engine's RTO will
+			 * retransmit once a route exists. */
+			aether_mesh_send_rreq(ctx->iface, dst);
+			return -ENETUNREACH;
+		}
+	}
+
+	memset(&hdr, 0, sizeof(hdr));
+	hdr.type = type;
+	hdr.ttl = CONFIG_AETHER_DEFAULT_TTL;
+	memcpy(hdr.src, ctx->local_addr, 6);
+	memcpy(hdr.dst, dst, 6);
+	hdr.seq_no = seq;
+	hdr.qos_security = qos;
+	hdr.length = len;
+
+#ifdef CONFIG_NET_L2_HEYMAC
+	uint16_t l2_net_id = heymac_get_network_id(ctx->iface);
+#else
+	uint16_t l2_net_id = aether_route_get_network_id_fallback(ctx->iface);
+#endif
+	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != l2_net_id) {
+		hdr.flags |= AETHER_FCTL_MESH_NET_ID;
+		hdr.mesh_net_id = ctx->mesh_net_id;
+	}
+
+	hdr_len = aether_mesh_build_header(&hdr, hdr_buf, sizeof(hdr_buf));
+	if (hdr_len < 0) {
+		return hdr_len;
+	}
+
+	pkt = net_pkt_alloc_with_buffer(ctx->iface, hdr_len + len, AF_UNSPEC, 0,
+					K_NO_WAIT);
+	if (!pkt) {
+		return -ENOMEM;
+	}
+	ret = net_pkt_write(pkt, hdr_buf, hdr_len);
+	if (ret == 0 && len) {
+		ret = net_pkt_write(pkt, data, len);
+	}
+	if (ret < 0) {
+		net_pkt_unref(pkt);
+		return ret;
+	}
+	net_if_queue_tx(ctx->iface, pkt);
+	return 0;
+}
+
+/* ---- engine I/O callbacks ---- */
+
+static int arq_cb_tx_data(void *user, const uint8_t dst[6], uint8_t seq,
+			  bool flow_start, const uint8_t *data, uint16_t len)
+{
+	ARG_UNUSED(user);
+	uint8_t qos = (AETHER_PRIORITY_NORMAL << 6) | (AETHER_DELIV_RELIABLE << 5) |
+		      (flow_start ? AETHER_QOS_FLOW_START : 0);
+	return arq_tx_frame(dst, AETHER_MSG_DATA, qos, seq, data, len);
+}
+
+static int arq_cb_tx_ack(void *user, const uint8_t dst[6],
+			 const struct aether_ack *ack)
+{
+	uint8_t b[AETHER_ACK_LEN];
+
+	ARG_UNUSED(user);
+	aether_ack_encode(ack, b);
+	return arq_tx_frame(dst, AETHER_MSG_ACK, 0, 0, b, AETHER_ACK_LEN);
+}
+
+static void arq_cb_deliver(void *user, const uint8_t src[6],
+			   const uint8_t *data, uint16_t len)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	ARG_UNUSED(user);
+	if (ctx && ctx->recv_cb) {
+		ctx->recv_cb(ctx->iface, src, data, len, ctx->recv_cb_user_data);
+	}
+}
+
+static void arq_cb_failed(void *user, const uint8_t dst[6], uint8_t seq)
+{
+	ARG_UNUSED(user);
+	LOG_WRN("reliable delivery failed to %02x:%02x seq=%u",
+		dst[4], dst[5], seq);
+}
+
+static void arq_tick_handler(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	aether_reliable_tick(&g_arq, k_uptime_get_32());
+	if (g_mesh_ctx) {
+		k_work_schedule_for_queue(&g_mesh_ctx->mesh_workq,
+					  &arq_tick_work, K_MSEC(ARQ_TICK_MS));
+	}
+}
+
+void aether_reliable_glue_init(void)
+{
+	struct aether_reliable_cfg cfg = {
+		.window = CONFIG_AETHER_RELIABLE_WINDOW,
+		.rto_base_ms = CONFIG_AETHER_RELIABLE_RTO_MS,
+		.ack_delay_ms = CONFIG_AETHER_RELIABLE_ACK_DELAY_MS,
+		.max_retries = CONFIG_AETHER_RELIABLE_MAX_RETRIES,
+	};
+	struct aether_reliable_io io = {
+		.tx_data = arq_cb_tx_data,
+		.tx_ack = arq_cb_tx_ack,
+		.deliver = arq_cb_deliver,
+		.failed = arq_cb_failed,
+		.user = NULL,
+	};
+
+	aether_reliable_init(&g_arq, &cfg, &io);
+	k_work_init_delayable(&arq_tick_work, arq_tick_handler);
+	if (g_mesh_ctx) {
+		k_work_schedule_for_queue(&g_mesh_ctx->mesh_workq,
+					  &arq_tick_work, K_MSEC(ARQ_TICK_MS));
+	}
+	LOG_INF("Æther reliable datagram engine ready (win=%d rto=%dms)",
+		CONFIG_AETHER_RELIABLE_WINDOW, CONFIG_AETHER_RELIABLE_RTO_MS);
+}
+
+void aether_reliable_glue_rx_data(const uint8_t src[6], uint8_t seq,
+				  bool flow_start, const uint8_t *payload,
+				  uint16_t len)
+{
+	aether_reliable_on_data(&g_arq, src, seq, flow_start, payload, len,
+				k_uptime_get_32());
+}
+
+void aether_reliable_glue_rx_ack(const uint8_t src[6],
+				 const uint8_t *ack_bytes, uint16_t len)
+{
+	struct aether_ack a;
+
+	if (len < AETHER_ACK_LEN) {
+		return;
+	}
+	aether_ack_decode(ack_bytes, &a);
+	aether_reliable_on_ack(&g_arq, src, &a, k_uptime_get_32());
+}
+
+/* Reliable datagram send via the §4.6 ARQ engine (unicast, end-to-end
+ * ordered + acknowledged). This is the path /net/aether's reliable
+ * conversations use. Distinct from the legacy aether_mesh_send_reliable()
+ * below, which is a synchronous best-effort send with LoRa-modem retries and
+ * is still used for broadcast traffic (chat) and the existing 9P transport. */
+int aether_mesh_reliable_send(struct net_if *iface, const uint8_t dst[6],
+			      const uint8_t *data, size_t len)
+{
+	if (!g_mesh_ctx || g_mesh_ctx->iface != iface || !dst || !data) {
+		return -EINVAL;
+	}
+	if (len > AETHER_RELIABLE_MTU) {
+		return -E2BIG;
+	}
+	return aether_reliable_send(&g_arq, dst, data, (uint16_t)len,
+				    k_uptime_get_32());
+}
+
+/* Legacy synchronous reliable send: builds the frame inline and blocks on
+ * aether_lora_send_sync() (modem-level retries). Best-effort delivery class;
+ * works for broadcast. Retained for chat, chess, and the current 9P-over-LoRa
+ * transport until they migrate to the engine. */
 int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 			      const uint8_t *data, size_t len, int max_retries)
 {
@@ -374,40 +579,29 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 		return -EINVAL;
 	}
 
-	/* Check if destination is broadcast */
-	static const uint8_t broadcast_addr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
-	bool is_broadcast = (memcmp(dst, broadcast_addr, 6) == 0);
-
-	if (!is_broadcast) {
-		/* For unicast, would need route lookup - for now just direct */
-		LOG_DBG("Reliable unicast not fully implemented, sending direct");
-	}
-
-	/* Build mesh header */
 	memset(&mesh_hdr, 0, sizeof(mesh_hdr));
 	mesh_hdr.type = AETHER_MSG_DATA;
 	mesh_hdr.ttl = CONFIG_AETHER_DEFAULT_TTL;
 	memcpy(mesh_hdr.src, ctx->local_addr, 6);
 	memcpy(mesh_hdr.dst, dst, 6);
 	mesh_hdr.seq_no = ctx->seq_no++;
-	mesh_hdr.qos_security = (AETHER_PRIORITY_NORMAL << 6) | (AETHER_DELIV_BESTEFFORT << 5);
+	mesh_hdr.qos_security = (AETHER_PRIORITY_NORMAL << 6) |
+				(AETHER_DELIV_BESTEFFORT << 5);
 	mesh_hdr.length = len;
 
-	/* Optimize network ID */
 	uint16_t heymac_net_id = heymac_get_network_id(iface);
 	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != heymac_net_id) {
 		mesh_hdr.flags |= AETHER_FCTL_MESH_NET_ID;
 		mesh_hdr.mesh_net_id = ctx->mesh_net_id;
 	}
 
-	/* Build mesh header into buffer */
-	mesh_hdr_len = aether_mesh_build_header(&mesh_hdr, mesh_hdr_buf, sizeof(mesh_hdr_buf));
+	mesh_hdr_len = aether_mesh_build_header(&mesh_hdr, mesh_hdr_buf,
+						sizeof(mesh_hdr_buf));
 	if (mesh_hdr_len < 0) {
 		LOG_ERR("Failed to build mesh header: %d", mesh_hdr_len);
 		return mesh_hdr_len;
 	}
 
-	/* Build simple HeyMac header (minimal for direct TX) */
 	struct heymac_context *heymac_ctx = net_if_l2_data(iface);
 	if (!heymac_ctx) {
 		return -EINVAL;
@@ -415,32 +609,25 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 
 	/* Frame format: [HeyMac header][Mesh header][Payload] */
 	frame_len = 0;
-
-	/* HeyMac header - simplified version for direct TX */
-	frame_buf[frame_len++] = HEYMAC_FRM_TYPE_DATA;  /* Version/Type */
-	frame_buf[frame_len++] = HEYMAC_FCTL_S | HEYMAC_FCTL_M | HEYMAC_FCTL_N;  /* Frame control */
-	frame_buf[frame_len++] = (heymac_ctx->net_id >> 8) & 0xFF;  /* Net ID high */
-	frame_buf[frame_len++] = heymac_ctx->net_id & 0xFF;  /* Net ID low */
-	/* Source address (short) */
+	frame_buf[frame_len++] = HEYMAC_FRM_TYPE_DATA;
+	frame_buf[frame_len++] = HEYMAC_FCTL_S | HEYMAC_FCTL_M | HEYMAC_FCTL_N;
+	frame_buf[frame_len++] = (heymac_ctx->net_id >> 8) & 0xFF;
+	frame_buf[frame_len++] = heymac_ctx->net_id & 0xFF;
 	frame_buf[frame_len++] = heymac_ctx->local_addr.short_addr[0];
 	frame_buf[frame_len++] = heymac_ctx->local_addr.short_addr[1];
-	frame_buf[frame_len++] = heymac_ctx->tx_seq_no++;  /* Sequence */
+	frame_buf[frame_len++] = heymac_ctx->tx_seq_no++;
 
-	/* Append mesh header */
 	if (frame_len + mesh_hdr_len + len > sizeof(frame_buf)) {
-		LOG_ERR("Frame too large: %d", frame_len + mesh_hdr_len + (int)len);
+		LOG_ERR("Frame too large: %d",
+			frame_len + mesh_hdr_len + (int)len);
 		return -ENOMEM;
 	}
 	memcpy(&frame_buf[frame_len], mesh_hdr_buf, mesh_hdr_len);
 	frame_len += mesh_hdr_len;
-
-	/* Append payload */
 	memcpy(&frame_buf[frame_len], data, len);
 	frame_len += len;
 
-	/* Send using synchronous TX with retries */
 	ret = aether_lora_send_sync(frame_buf, frame_len, max_retries);
-
 	if (ret == 0) {
 		LOG_DBG("Reliable send success to %02x:%02x, len=%zu",
 			dst[4], dst[5], len);
@@ -448,6 +635,5 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 		LOG_WRN("Reliable send failed to %02x:%02x: %d",
 			dst[4], dst[5], ret);
 	}
-
 	return ret;
 }

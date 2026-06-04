@@ -135,6 +135,54 @@ config AETHER_MAX_PAYLOAD
 	  255 bytes per LoRa packet. Larger payloads reduce fragmentation
 	  overhead for 9P transport.
 
+# --- Reliable datagram (DELIV_RELIABLE) engine, see docs §4.6 ---
+
+config AETHER_RELIABLE_WINDOW
+	int "Reliable in-flight window (segments)"
+	default 8
+	range 1 32
+	help
+	  Maximum reliable DATA segments in flight per peer. Must stay < 64 so
+	  selective repeat is unambiguous in the 1-byte sequence space. LoRa
+	  effectively uses one message's worth; higher-rate PHYs use more.
+
+config AETHER_RELIABLE_PEERS
+	int "Reliable per-peer state slots"
+	default 4
+	range 1 32
+	help
+	  Number of concurrent peers the reliable engine tracks. Least-recently
+	  used soft state is evicted when exceeded.
+
+config AETHER_RELIABLE_MTU
+	int "Reliable segment buffer size (bytes)"
+	default 200
+	range 32 255
+	help
+	  Per-slot TX/RX buffer size. Should match AETHER_MAX_PAYLOAD. Drives
+	  the reliable engine's static memory: ~2 * WINDOW * PEERS * MTU.
+
+config AETHER_RELIABLE_RTO_MS
+	int "Reliable base retransmit timeout (ms)"
+	default 4000
+	help
+	  Initial RTO before exponential backoff. LoRa SF10/BW125 wants seconds;
+	  high-rate PHYs (DECT NR+) want tens of ms.
+
+config AETHER_RELIABLE_ACK_DELAY_MS
+	int "Reliable delayed-ACK window (ms)"
+	default 300
+	help
+	  Coalesce/piggyback window for ACKs. 0 = acknowledge immediately. LoRa
+	  coalesces hard (200-500); high-rate PHYs use ~0.
+
+config AETHER_RELIABLE_MAX_RETRIES
+	int "Reliable max retransmissions before failure"
+	default 5
+	help
+	  After this many retransmits of a segment, delivery is declared failed
+	  and the per-peer state is reset (the upper-layer session times out).
+
 config AETHER_SHELL
 	bool "Æther shell commands"
 	depends on SHELL

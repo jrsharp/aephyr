@@ -14,6 +14,7 @@ LOG_MODULE_REGISTER(aether_mesh, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/net/heymac.h>
 #endif
 #include <zephyr/net/aether_mesh.h>
+#include <zephyr/net/aether_reliable.h>
 #include <zephyr/random/random.h>
 #include <string.h>
 
@@ -243,6 +244,9 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 				  K_SECONDS(60));
 
 	g_mesh_ctx = ctx;
+
+	/* Bring up the reliable-datagram engine + its tick (§4.6). */
+	aether_reliable_glue_init();
 
 	LOG_INF("Æther mesh initialized, net_id=0x%04x", mesh_net_id);
 	return 0;
@@ -511,8 +515,13 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		return;
 	}
 
-	/* Duplicate detection for data messages (skip for hello beacons) */
-	if (hdr.type != AETHER_MSG_HELLO && is_duplicate(hdr.src, hdr.seq_no)) {
+	/* Duplicate detection for data messages (skip for hello beacons, ACKs,
+	 * and reliable packets — the reliable engine owns end-to-end dedup and
+	 * needs to see retransmits to re-ACK them; the seq_no is the engine's,
+	 * not the mesh-forwarding dedup's). */
+	bool reliable = AETHER_QOS_IS_RELIABLE(hdr.qos_security);
+	if (hdr.type != AETHER_MSG_HELLO && hdr.type != AETHER_MSG_ACK &&
+	    !reliable && is_duplicate(hdr.src, hdr.seq_no)) {
 		LOG_INF("Dropping duplicate from %02x:%02x:%02x:%02x:%02x:%02x seq=%d",
 			hdr.src[0], hdr.src[1], hdr.src[2],
 			hdr.src[3], hdr.src[4], hdr.src[5], hdr.seq_no);
@@ -581,15 +590,23 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			/* Remove mesh header */
 			net_pkt_pull(pkt, hdr_len);
 
-			/* Call application callback if registered */
-			if (ctx->recv_cb) {
-				size_t payload_len = net_pkt_get_len(pkt);
-				uint8_t *payload = pkt->buffer ? pkt->buffer->data : NULL;
+			size_t payload_len = net_pkt_get_len(pkt);
+			uint8_t *payload = pkt->buffer ? pkt->buffer->data : NULL;
 
-				if (payload && payload_len > 0) {
-					ctx->recv_cb(iface, hdr.src, payload,
-						     payload_len, ctx->recv_cb_user_data);
+			if (reliable &&
+			    memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
+				/* Reliable unicast → through the ARQ engine,
+				 * which delivers in order and emits ACKs. */
+				bool fs = AETHER_QOS_IS_FLOW_START(hdr.qos_security);
+				if (payload) {
+					aether_reliable_glue_rx_data(
+						hdr.src, hdr.seq_no, fs,
+						payload, (uint16_t)payload_len);
 				}
+			} else if (ctx->recv_cb && payload && payload_len > 0) {
+				/* Best-effort (incl. broadcast) → deliver direct. */
+				ctx->recv_cb(iface, hdr.src, payload,
+					     payload_len, ctx->recv_cb_user_data);
 			}
 			net_pkt_unref(pkt);
 		} else {
@@ -627,6 +644,21 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			ctx->packets_forwarded++;
 			LOG_DBG("Packet forwarded to next hop");
 		}
+		break;
+
+	case AETHER_MSG_ACK:
+		/* Reliable-datagram acknowledgment (§4.6). Handle if for us;
+		 * multi-hop ACK forwarding is a TODO alongside RREQ/RREP. */
+		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
+			net_pkt_pull(pkt, hdr_len);
+			size_t alen = net_pkt_get_len(pkt);
+			uint8_t *ab = pkt->buffer ? pkt->buffer->data : NULL;
+			if (ab && alen >= AETHER_ACK_LEN) {
+				aether_reliable_glue_rx_ack(hdr.src, ab,
+							    (uint16_t)alen);
+			}
+		}
+		net_pkt_unref(pkt);
 		break;
 
 	default:

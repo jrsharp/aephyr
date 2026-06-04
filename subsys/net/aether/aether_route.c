@@ -468,12 +468,28 @@ static int arq_cb_tx_ack(void *user, const uint8_t dst[6],
 	return arq_tx_frame(dst, AETHER_MSG_ACK, 0, 0, b, AETHER_ACK_LEN);
 }
 
+static aether_reliable_recv_cb_t g_rel_recv_cb;
+static void *g_rel_recv_user;
+
+void aether_reliable_set_recv_cb(aether_reliable_recv_cb_t cb, void *user)
+{
+	g_rel_recv_cb = cb;
+	g_rel_recv_user = user;
+}
+
 static void arq_cb_deliver(void *user, const uint8_t src[6],
 			   const uint8_t *data, uint16_t len)
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
 
 	ARG_UNUSED(user);
+	/* Reliable deliveries go to the registered reliable handler (the
+	 * /net/aether server); fall back to the best-effort recv callback so
+	 * nothing is silently dropped if no handler is set. */
+	if (g_rel_recv_cb) {
+		g_rel_recv_cb(src, data, len, g_rel_recv_user);
+		return;
+	}
 	if (ctx && ctx->recv_cb) {
 		ctx->recv_cb(ctx->iface, src, data, len, ctx->recv_cb_user_data);
 	}

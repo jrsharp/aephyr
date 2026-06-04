@@ -387,6 +387,17 @@ const uint8_t *aether_mesh_local_addr(void);
 int aether_mesh_reliable_send(struct net_if *iface, const uint8_t dst[6],
 			      const uint8_t *data, size_t len);
 
+/** Callback for an in-order reliable datagram delivered by the §4.6 engine.
+ *  Distinct from the best-effort recv callback (aether_mesh_register_recv_
+ *  callback): reliable deliveries route here when a handler is registered. */
+typedef void (*aether_reliable_recv_cb_t)(const uint8_t src[6],
+					  const uint8_t *data, uint16_t len,
+					  void *user);
+
+/** Register the reliable-delivery handler (e.g. the /net/aether server).
+ *  Pass cb=NULL to clear and fall back to the best-effort recv callback. */
+void aether_reliable_set_recv_cb(aether_reliable_recv_cb_t cb, void *user);
+
 /** Initialize the reliable engine + its periodic tick.  Call once after the
  *  mesh context is up (g_mesh_ctx set). */
 void aether_reliable_glue_init(void);

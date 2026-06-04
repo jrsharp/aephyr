@@ -669,6 +669,16 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 }
 
 /* API functions */
+struct net_if *aether_mesh_iface(void)
+{
+	return g_mesh_ctx ? g_mesh_ctx->iface : NULL;
+}
+
+const uint8_t *aether_mesh_local_addr(void)
+{
+	return g_mesh_ctx ? g_mesh_ctx->local_addr : NULL;
+}
+
 int aether_mesh_get_neighbor_count(struct net_if *iface)
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;

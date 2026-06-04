@@ -374,6 +374,13 @@ int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err)
 /* ---- Reliable-datagram glue (§4.6).  Defined in aether_route.c, which
  * drives the pure aether_reliable engine and provides its net_pkt I/O. ---- */
 
+/** The mesh network interface (NULL until aether_mesh_init). Lets callers
+ *  that don't already hold the iface (e.g. the /net/aether server) reach it. */
+struct net_if *aether_mesh_iface(void);
+
+/** Our 6-byte mesh address (NULL until aether_mesh_init). */
+const uint8_t *aether_mesh_local_addr(void);
+
 /** Send a unicast reliable datagram via the §4.6 ARQ engine (ordered,
  *  acknowledged, retransmitted). The path /net/aether reliable conversations
  *  use. Returns 0, -EAGAIN if the peer window is full, or an error. */

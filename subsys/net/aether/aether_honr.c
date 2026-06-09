@@ -298,7 +298,7 @@ static void honr_join_decide_handler(struct k_work *work)
 		return;
 	}
 
-	memcpy(req, ctx->local_addr, 6); /* joiner id */
+	memcpy(req, ctx->node_eui, 6); /* joiner id: stable, not the HONR-mutable local_addr */
 	req[6] = (uint8_t)(honr_cand_parent >> 8);
 	req[7] = (uint8_t)(honr_cand_parent & 0xFF);
 	if (honr_send_ctrl(honr_iface, AETHER_MSG_TREE_JOIN_REQ, req, sizeof(req)) == 0) {
@@ -319,6 +319,12 @@ void aether_honr_join_init(struct net_if *iface)
 
 	uint8_t hwid[8];
 	ssize_t hlen;
+
+	/* Capture the stable unique node identity BEFORE the election/forced-root
+	 * can overwrite local_addr[4..5] with the HONR address. This is the joiner
+	 * id used in the tree-join handshake, so it stays unique even while the
+	 * HONR address is 0x0000 (root/unjoined). */
+	memcpy(ctx->node_eui, ctx->local_addr, 6);
 
 	honr_iface = iface;
 	ctx->honr_child_bitmap = 0;
@@ -386,11 +392,18 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 		 */
 		if (ctx->honr_joined && honr_is_root(ctx->honr_addr) &&
 		    parent_addr == HONR_ROOT) {
-			if (peer_id < honr_node_id) {
-				LOG_WRN("HONR: yielding root to lower id %08x", peer_id);
-				honr_relinquish_root();
+			if (peer_id >= honr_node_id) {
+				break; /* we hold the lower (winning) id: keep root */
 			}
-			break;
+			LOG_WRN("HONR: yielding root to lower id %08x, joining it", peer_id);
+			honr_relinquish_root();
+			/* Fall through (no break): let THIS announce seed the join
+			 * candidate now. Relinquishing and then waiting would re-elect
+			 * before the winner's next announce arrives, since the election
+			 * delay is shorter than the announce interval -- the classic
+			 * dual-root oscillation. Seeding the join here lets it complete
+			 * (~JOIN_COLLECT_MS) before the re-armed election fires.
+			 */
 		}
 
 		/* Refresh parent liveness from its announcement (even if it is now
@@ -424,9 +437,9 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 				LOG_INF("HONR: re-parenting under %04x (rank %u), was %04x (rank %u)",
 					parent_addr, parent_rank, ctx->honr_addr,
 					honr_rank(ctx->honr_addr));
-				ctx->honr_joined = false; /* keep local_addr as joiner id */
+				ctx->honr_joined = false; /* node_eui carries the joiner id */
 				honr_cand_valid = false;
-				memcpy(req, ctx->local_addr, 6);
+				memcpy(req, ctx->node_eui, 6);
 				req[6] = (uint8_t)(parent_addr >> 8);
 				req[7] = (uint8_t)(parent_addr & 0xFF);
 				if (honr_send_ctrl(iface, AETHER_MSG_TREE_JOIN_REQ, req,
@@ -495,8 +508,8 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 		if (ctx->honr_joined || len < HONR_REP_LEN) {
 			break;
 		}
-		if (memcmp(payload, ctx->local_addr, 6) != 0) {
-			break; /* not our reply */
+		if (memcmp(payload, ctx->node_eui, 6) != 0) {
+			break; /* not our reply (matched against our stable joiner id) */
 		}
 		assigned = (uint16_t)((payload[6] << 8) | payload[7]);
 		if (!honr_is_valid_node(assigned) || honr_is_root(assigned)) {

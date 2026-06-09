@@ -38,6 +38,22 @@ static uint8_t frame_buf[CONFIG_AETHER_MAX_PAYLOAD + 32]
 static uint8_t frame_buf[CONFIG_AETHER_MAX_PAYLOAD + 32];
 #endif
 
+/* --- Stop-and-wait ACK for unicast datagram reliability ------------------
+ * The PHY is best-effort (no link ack), so a lost frame is just lost. Here we
+ * add a minimal stop-and-wait ARQ: the sender waits for the receiver's ACK and
+ * retransmits on timeout (only on actual loss -- no blind redundancy, so no
+ * channel congestion when the first copy lands). Sends are serialized (the 9P
+ * server drives them on one thread), so a single pending-ack slot is enough;
+ * the ACK arrives on the RX thread and gives the semaphore. */
+#define AETHER_ACK_TIMEOUT_MS 250          /* per-attempt wait for the ACK */
+static K_SEM_DEFINE(ack_sem, 0, 1);
+static struct {
+	uint8_t dst[6];      /* peer we are awaiting an ACK from */
+	uint8_t seq;         /* seq_no of the DATA we sent */
+	volatile bool waiting;
+} ack_wait;
+static uint8_t ack_buf[40];                /* separate from frame_buf: ACK TX from RX ctx */
+
 /* Route discovery and management functions */
 
 int aether_mesh_find_route(struct net_if *iface, const uint8_t dst[6], 
@@ -462,16 +478,86 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 	memcpy(&frame_buf[frame_len], data, len);
 	frame_len += len;
 
-	/* Send using synchronous TX with retries */
-	ret = aether_lora_send_sync(frame_buf, frame_len, max_retries);
+	if (is_broadcast) {
+		/* No single acker for a broadcast -- best-effort, one shot. */
+		return aether_lora_send_sync(frame_buf, frame_len, max_retries);
+	}
+
+	/* Unicast: stop-and-wait ARQ. Arm the pending-ack BEFORE the first TX, then
+	 * (re)transmit and wait for the receiver's ACK; the RX path gives ack_sem.
+	 * Retransmits only on a missed ACK (no congestion when the first arrives);
+	 * the receiver dedups a retransmitted DATA by (src, seq_no). */
+	k_sem_reset(&ack_sem);
+	memcpy(ack_wait.dst, dst, 6);
+	ack_wait.seq = mesh_hdr.seq_no;
+	ack_wait.waiting = true;
+
+	ret = -ETIMEDOUT;
+	for (int attempt = 0; attempt <= max_retries; attempt++) {
+		(void)aether_lora_send_sync(frame_buf, frame_len, 2);
+		if (k_sem_take(&ack_sem, K_MSEC(AETHER_ACK_TIMEOUT_MS)) == 0) {
+			ret = 0;
+			break;
+		}
+	}
+	ack_wait.waiting = false;
 
 	if (ret == 0) {
-		LOG_DBG("Reliable send success to %02x:%02x, len=%zu",
-			dst[4], dst[5], len);
+		LOG_DBG("datagram ACKed by %02x:%02x seq=%u len=%zu",
+			dst[4], dst[5], mesh_hdr.seq_no, len);
 	} else {
-		LOG_WRN("Reliable send failed to %02x:%02x: %d",
-			dst[4], dst[5], ret);
+		LOG_WRN("datagram to %02x:%02x seq=%u: NO ACK after %d tries",
+			dst[4], dst[5], mesh_hdr.seq_no, max_retries + 1);
 	}
 
 	return ret;
+}
+
+/* Build + transmit a bare ACK frame back to `to`, echoing the acked `seq`.
+ * Called from the RX path; uses ack_buf (never frame_buf) so it can run
+ * concurrently with a send_reliable in its ACK wait. Best-effort: if the ACK
+ * is lost the sender retransmits the DATA and we re-ACK from the dup path. */
+void aether_mesh_send_ack(struct net_if *iface, const uint8_t to[6], uint8_t seq)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	struct heymac_context *hm = iface ? net_if_l2_data(iface) : NULL;
+	struct aether_mesh_hdr h;
+	uint8_t mh[32];
+	int mhl, fl = 0;
+
+	if (!ctx || !hm) {
+		return;
+	}
+	memset(&h, 0, sizeof(h));
+	h.type = AETHER_MSG_ACK;
+	h.ttl = CONFIG_AETHER_DEFAULT_TTL;
+	memcpy(h.src, ctx->local_addr, 6);
+	memcpy(h.dst, to, 6);
+	h.seq_no = seq;                 /* echo the DATA's seq so the sender matches */
+	h.qos_security = (AETHER_PRIORITY_NORMAL << 6) | (AETHER_DELIV_BESTEFFORT << 5);
+	h.length = 0;
+	mhl = aether_mesh_build_header(&h, mh, sizeof(mh));
+	if (mhl < 0) {
+		return;
+	}
+	ack_buf[fl++] = HEYMAC_FRM_TYPE_DATA;
+	ack_buf[fl++] = HEYMAC_FCTL_S | HEYMAC_FCTL_M | HEYMAC_FCTL_N;
+	ack_buf[fl++] = (hm->net_id >> 8) & 0xFF;
+	ack_buf[fl++] = hm->net_id & 0xFF;
+	ack_buf[fl++] = hm->local_addr.short_addr[0];
+	ack_buf[fl++] = hm->local_addr.short_addr[1];
+	ack_buf[fl++] = hm->tx_seq_no++;
+	memcpy(&ack_buf[fl], mh, mhl);
+	fl += mhl;
+	(void)aether_lora_send_sync(ack_buf, fl, 1);
+}
+
+/* Called from the RX path when an ACK arrives: wake send_reliable if it matches
+ * the conversation we're awaiting an ACK for. */
+void aether_mesh_ack_received(const uint8_t from[6], uint8_t seq)
+{
+	if (ack_wait.waiting && ack_wait.seq == seq &&
+	    memcmp(ack_wait.dst, from, 6) == 0) {
+		k_sem_give(&ack_sem);
+	}
 }

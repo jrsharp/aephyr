@@ -348,6 +348,18 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 			      const uint8_t *data, size_t len, int max_retries);
 
 /**
+ * @brief Send a bare ACK back to `to`, echoing the acked `seq` (stop-and-wait
+ *        ARQ for unicast datagrams). Called from the RX path on DATA-for-us.
+ */
+void aether_mesh_send_ack(struct net_if *iface, const uint8_t to[6], uint8_t seq);
+
+/**
+ * @brief Note an incoming ACK from `from` for `seq`; wakes a waiting
+ *        aether_mesh_send_reliable() if it matches. Called from the RX path.
+ */
+void aether_mesh_ack_received(const uint8_t from[6], uint8_t seq);
+
+/**
  * @brief Low-level synchronous LoRa send with retries (driver level)
  *
  * @param data Raw data to transmit

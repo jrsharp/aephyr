@@ -516,8 +516,16 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		return;
 	}
 
-	/* Duplicate detection for data messages (skip for hello beacons) */
-	if (hdr.type != AETHER_MSG_HELLO && is_duplicate(hdr.src, hdr.seq_no)) {
+	/* Duplicate detection (skip hello beacons; ACKs are idempotent and exempt so
+	 * a retransmit-driven re-ACK is never dropped as a duplicate). */
+	if (hdr.type != AETHER_MSG_HELLO && hdr.type != AETHER_MSG_ACK &&
+	    is_duplicate(hdr.src, hdr.seq_no)) {
+		/* A duplicate DATA for us means our earlier ACK was lost and the sender
+		 * retransmitted -- re-ACK so it stops, then drop (do not re-deliver). */
+		if (hdr.type == AETHER_MSG_DATA &&
+		    memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
+			aether_mesh_send_ack(iface, hdr.src, hdr.seq_no);
+		}
 		LOG_INF("Dropping duplicate from %02x:%02x:%02x:%02x:%02x:%02x seq=%d",
 			hdr.src[0], hdr.src[1], hdr.src[2],
 			hdr.src[3], hdr.src[4], hdr.src[5], hdr.seq_no);
@@ -562,10 +570,18 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 	
 	case AETHER_MSG_RERR:
 		LOG_DBG("Received RERR from %02x:%02x:%02x:%02x:%02x:%02x",
-			hdr.src[0], hdr.src[1], hdr.src[2], 
+			hdr.src[0], hdr.src[1], hdr.src[2],
 			hdr.src[3], hdr.src[4], hdr.src[5]);
 		/* TODO: Process RERR - remove broken routes */
 		/* TODO: Propagate RERR to affected nodes */
+		net_pkt_unref(pkt);
+		break;
+
+	case AETHER_MSG_ACK:
+		/* Stop-and-wait ARQ: an ACK for a unicast datagram we sent. */
+		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
+			aether_mesh_ack_received(hdr.src, hdr.seq_no);
+		}
 		net_pkt_unref(pkt);
 		break;
 
@@ -583,6 +599,11 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		/* Check if packet is for us */
 		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0 ||
 		    memcmp(hdr.dst, "\xff\xff\xff\xff\xff\xff", 6) == 0) {
+			/* Unicast datagram for us: ACK it before delivering (stop-and-wait
+			 * ARQ). Broadcasts are not ACKed (no single acker). */
+			if (memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
+				aether_mesh_send_ack(iface, hdr.src, hdr.seq_no);
+			}
 			/* Remove mesh header */
 			net_pkt_pull(pkt, hdr_len);
 

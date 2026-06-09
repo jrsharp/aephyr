@@ -588,7 +588,12 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 
 			/* Call application callback if registered */
 			if (ctx->recv_cb) {
-				size_t payload_len = net_pkt_get_len(pkt);
+				/* hdr.length is the real datagram length the sender stamped;
+				 * net_pkt_get_len() is the fixed DECT PHY slot (payload +
+				 * trailing padding). Deliver hdr.length, clamped to the present
+				 * length, so callers get the real payload not the padded frame. */
+				size_t avail = net_pkt_get_len(pkt);
+				size_t payload_len = hdr.length < avail ? hdr.length : avail;
 				uint8_t *payload = pkt->buffer ? pkt->buffer->data : NULL;
 
 				if (payload && payload_len > 0) {

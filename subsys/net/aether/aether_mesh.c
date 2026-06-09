@@ -587,7 +587,7 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			net_pkt_pull(pkt, hdr_len);
 
 			/* Call application callback if registered */
-			if (ctx->recv_cb) {
+			if (ctx->recv_cb_count > 0) {
 				/* hdr.length is the real datagram length the sender stamped;
 				 * net_pkt_get_len() is the fixed DECT PHY slot (payload +
 				 * trailing padding). Deliver hdr.length, clamped to the present
@@ -597,8 +597,9 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 				uint8_t *payload = pkt->buffer ? pkt->buffer->data : NULL;
 
 				if (payload && payload_len > 0) {
-					ctx->recv_cb(iface, hdr.src, payload,
-						     payload_len, ctx->recv_cb_user_data);
+					for (uint8_t cbi = 0; cbi < ctx->recv_cb_count; cbi++) {
+						ctx->recv_cbs[cbi](iface, hdr.src, payload, payload_len, ctx->recv_cb_users[cbi]);
+					}
 				}
 			}
 			net_pkt_unref(pkt);
@@ -752,8 +753,12 @@ int aether_mesh_register_recv_callback(struct net_if *iface,
 		return -EINVAL;
 	}
 
-	ctx->recv_cb = cb;
-	ctx->recv_cb_user_data = user_data;
+	if (ctx->recv_cb_count >= 4) {
+		return -ENOMEM;
+	}
+	ctx->recv_cbs[ctx->recv_cb_count] = cb;
+	ctx->recv_cb_users[ctx->recv_cb_count] = user_data;
+	ctx->recv_cb_count++;
 
 	LOG_DBG("Receive callback registered");
 	return 0;

@@ -140,8 +140,12 @@ struct aether_mesh_ctx {
 	uint8_t node_eui[6];
 
 	/* Application receive callback */
-	aether_mesh_recv_cb_t recv_cb;
-	void *recv_cb_user_data;
+	/* Multiple recv callbacks: the /net/aether datagram service and the chat
+	 * party-line both register; a single slot let one clobber the other.
+	 * Deliver to all registered callbacks. */
+	aether_mesh_recv_cb_t recv_cbs[4];
+	void *recv_cb_users[4];
+	uint8_t recv_cb_count;
 
 	/* Neighbor table */
 	struct aether_neighbor neighbors[CONFIG_AETHER_MAX_NEIGHBORS];

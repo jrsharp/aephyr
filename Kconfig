@@ -17,7 +17,7 @@ config NET_L2_HEYMAC
 	  Enable HeyMac Layer 2 protocol for mesh networking.
 	  HeyMac provides the MAC layer for Æther mesh networks. It is
 	  radio-agnostic; the concrete radio is provided by a driver
-	  integration (AETHER_LORA for SX126x, AETHER_DECT for DECT NR+).
+	  integration (AETHER_LORA for SX126x, AETHER_DECT for the DECT NR+ PHY).
 
 if NET_L2_HEYMAC
 
@@ -322,7 +322,7 @@ config AETHER_LORA_CAD_BACKOFF_MAX_MS
 endif # AETHER_LORA
 
 config AETHER_DECT
-	bool "Æther DECT NR+ driver integration"
+	bool "Æther DECT NR+ PHY driver integration"
 	depends on NET_L2_HEYMAC
 	depends on NRF_MODEM_LIB
 	help
@@ -341,7 +341,7 @@ config AETHER_DECT_LOG_LEVEL
 	range 0 4
 
 config AETHER_DECT_CARRIER
-	int "DECT NR+ carrier (channel) number"
+	int "DECT NR+ PHY carrier (channel) number"
 	default 0
 	help
 	  Absolute channel frequency number. Availability and the rules for
@@ -350,8 +350,21 @@ config AETHER_DECT_CARRIER
 	  carrier deliberately for your region (1677 is a common EU value,
 	  1711 a common US value).
 
+config AETHER_DECT_BAND_GROUP
+	int "DECT NR+ PHY band group index"
+	range 0 1
+	default 0
+	help
+	  RF band group passed to nrf_modem_dect_phy_configure(): 0 selects the
+	  ~2 GHz bands (1, 2, 9), 1 selects the ~1 GHz bands (4, 22). This must be
+	  set explicitly because it disambiguates the carrier: band 22 (sub-GHz,
+	  US 915 MHz, carriers 1691-1711) overlaps band 9 (1.9 GHz, 1703-1711) and
+	  band 2 (1680-1700) in carrier number, so the carrier alone does not
+	  determine the frequency. For US 915 MHz / band 22, set this to 1 and use
+	  a carrier in 1691-1711.
+
 config AETHER_DECT_NETWORK_ID
-	int "DECT NR+ network ID"
+	int "DECT NR+ PHY network ID"
 	range 1 4294967295
 	default 91
 	help
@@ -381,7 +394,7 @@ config AETHER_DECT_TX_POWER
 	range 0 13
 	default 11
 	help
-	  DECT NR+ transmit power setting (see ETSI TS 103 636-4 table
+	  DECT NR+ PHY transmit power setting (see ETSI TS 103 636-4 table
 	  6.2.1-3). Lower values reduce interference between bench nodes.
 
 config AETHER_DECT_RX_WINDOW_MS

@@ -21,7 +21,7 @@
 LOG_MODULE_REGISTER(dect_phy, CONFIG_AETHER_DECT_LOG_LEVEL);
 
 BUILD_ASSERT(CONFIG_AETHER_DECT_CARRIER,
-	     "DECT NR+ carrier must be set per local regulations "
+	     "DECT NR+ PHY carrier must be set per local regulations "
 	     "(CONFIG_AETHER_DECT_CARRIER)");
 
 #define DECT_PHY_TX_HANDLE   0
@@ -50,7 +50,7 @@ struct phy_ctrl_field_common {
 BUILD_ASSERT(sizeof(union nrf_modem_dect_phy_hdr) >= sizeof(struct phy_ctrl_field_common),
 	     "Type 1 header overlay does not fit the modem PHY header union");
 BUILD_ASSERT(sizeof(((union nrf_modem_dect_phy_hdr *)0)->type_2) == 10,
-	     "unexpected DECT NR+ Type 2 header size");
+	     "unexpected DECT NR+ PHY Type 2 header size");
 
 /* Synchronizes blocking calls (init/configure/activate, TX, RSSI) with their
  * modem completion event. Receive is asynchronous (see rx_done_sem) so it does
@@ -102,11 +102,25 @@ static uint16_t last_pcc_tx_id;
 static struct dect_phy_stats stats;
 
 static const struct nrf_modem_dect_phy_config_params config_params = {
-	.band_group_index =
-		((CONFIG_AETHER_DECT_CARRIER >= 525 && CONFIG_AETHER_DECT_CARRIER <= 551)) ? 1 : 0,
+	/* Band group disambiguates the carrier: 0 = ~2 GHz (bands 1/2/9), 1 =
+	 * ~1 GHz (bands 4/22). It must be explicit, because band 22's carriers
+	 * (1691-1711) overlap band 9 (1703-1711) and band 2 (1680-1700), so the
+	 * carrier number alone does not determine the frequency.
+	 */
+	.band_group_index = CONFIG_AETHER_DECT_BAND_GROUP,
 	.harq_rx_process_count = 4,
 	.harq_rx_expiry_time_us = 5000000,
 };
+
+/* Snapshot of the modem-reported supported bands, captured during init (while
+ * the PHY is deactivated, as band_get requires) so the exact carrier range and
+ * power class of each band can be confirmed on-device via the `dect bands`
+ * shell command before transmitting.
+ */
+#define DECT_PHY_MAX_BANDS 8
+static struct dect_phy_band_info cached_bands[DECT_PHY_MAX_BANDS];
+static uint8_t cached_band_count;
+static uint32_t cached_supported_bands;
 
 static void on_init(const struct nrf_modem_dect_phy_init_event *evt)
 {
@@ -198,6 +212,39 @@ static void on_rssi(const struct nrf_modem_dect_phy_rssi_event *evt)
 	last_rssi_peak = peak;
 }
 
+static void on_bands(const struct nrf_modem_dect_phy_band_get_event *evt)
+{
+	if (evt->err) {
+		LOG_WRN("band_get failed, err %d", evt->err);
+		k_sem_give(&operation_sem);
+		return;
+	}
+
+	cached_supported_bands = evt->supported_bands;
+	cached_band_count = MIN(evt->band_count, DECT_PHY_MAX_BANDS);
+	for (uint8_t i = 0; i < cached_band_count; i++) {
+		cached_bands[i].band_number = evt->band[i].band_number;
+		cached_bands[i].band_group_index = evt->band[i].band_group_index;
+		cached_bands[i].power_class = evt->band[i].power_class;
+		cached_bands[i].rx_gain = evt->band[i].rx_gain;
+		cached_bands[i].min_carrier = evt->band[i].min_carrier;
+		cached_bands[i].max_carrier = evt->band[i].max_carrier;
+	}
+	k_sem_give(&operation_sem);
+}
+
+static void log_supported_bands(void)
+{
+	LOG_INF("DECT NR+ PHY bands (supported bitmap 0x%08x):",
+		(unsigned int)cached_supported_bands);
+	for (uint8_t i = 0; i < cached_band_count; i++) {
+		LOG_INF("  band %u: group %u, carriers %u-%u, power class %u",
+			cached_bands[i].band_number, cached_bands[i].band_group_index,
+			cached_bands[i].min_carrier, cached_bands[i].max_carrier,
+			cached_bands[i].power_class);
+	}
+}
+
 static void dect_phy_event_handler(const struct nrf_modem_dect_phy_event *evt)
 {
 	modem_time = evt->time;
@@ -228,6 +275,9 @@ static void dect_phy_event_handler(const struct nrf_modem_dect_phy_event *evt)
 		break;
 	case NRF_MODEM_DECT_PHY_EVT_RSSI:
 		on_rssi(&evt->rssi);
+		break;
+	case NRF_MODEM_DECT_PHY_EVT_BANDS:
+		on_bands(&evt->band_get);
 		break;
 	default:
 		break;
@@ -295,6 +345,18 @@ int dect_phy_init(uint16_t *device_id)
 	k_sem_take(&operation_sem, K_FOREVER);
 	if (init_failed) {
 		return -EIO;
+	}
+
+	/* Snapshot the supported bands while deactivated (band_get requires it),
+	 * so the configured carrier range and power class can be confirmed via the
+	 * `dect bands` shell command before transmitting. Non-fatal if it fails.
+	 */
+	err = nrf_modem_dect_phy_band_get();
+	if (err) {
+		LOG_WRN("band_get submit failed, err %d", err);
+	} else {
+		k_sem_take(&operation_sem, K_FOREVER);
+		log_supported_bands();
 	}
 
 	err = nrf_modem_dect_phy_activate(NRF_MODEM_DECT_PHY_RADIO_MODE_LOW_LATENCY);
@@ -540,4 +602,14 @@ void dect_phy_get_info(uint16_t *device_id, uint16_t *carrier, int8_t *tx_power)
 	if (tx_power != NULL) {
 		*tx_power = cfg_tx_power;
 	}
+}
+
+uint8_t dect_phy_get_bands(struct dect_phy_band_info *out, uint8_t max)
+{
+	uint8_t n = MIN(cached_band_count, max);
+
+	if (out != NULL && n > 0) {
+		memcpy(out, cached_bands, (size_t)n * sizeof(*out));
+	}
+	return n;
 }

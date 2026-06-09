@@ -41,6 +41,32 @@ static int cmd_dect_info(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_dect_bands(const struct shell *sh, size_t argc, char **argv)
+{
+	struct dect_phy_band_info bands[8];
+	uint8_t n;
+
+	ARG_UNUSED(argc);
+	ARG_UNUSED(argv);
+
+	n = dect_phy_get_bands(bands, ARRAY_SIZE(bands));
+	if (n == 0) {
+		shell_print(sh, "No band info reported by the modem.");
+		return 0;
+	}
+
+	shell_print(sh, "DECT NR+ PHY bands (modem-reported):");
+	for (uint8_t i = 0; i < n; i++) {
+		shell_print(sh,
+			    "  band %2u  group %u (%s)  carriers %u-%u  power class %u  rx_gain %d dB",
+			    bands[i].band_number, bands[i].band_group_index,
+			    bands[i].band_group_index ? "~1 GHz" : "~2 GHz",
+			    bands[i].min_carrier, bands[i].max_carrier,
+			    bands[i].power_class, bands[i].rx_gain);
+	}
+	return 0;
+}
+
 static int cmd_dect_stats(const struct shell *sh, size_t argc, char **argv)
 {
 	struct dect_phy_stats stats;
@@ -89,6 +115,8 @@ static int cmd_dect_cad(const struct shell *sh, size_t argc, char **argv)
 
 SHELL_STATIC_SUBCMD_SET_CREATE(sub_dect,
 	SHELL_CMD(info, NULL, "Show DECT NR+ PHY identity and settings", cmd_dect_info),
+	SHELL_CMD(bands, NULL, "Show modem-reported bands (carrier ranges, power class)",
+		  cmd_dect_bands),
 	SHELL_CMD(stats, NULL, "Show DECT NR+ PHY tx/rx statistics", cmd_dect_stats),
 	SHELL_CMD_ARG(cad, NULL, "Probe channel activity [count=10]", cmd_dect_cad, 1, 1),
 	SHELL_SUBCMD_SET_END

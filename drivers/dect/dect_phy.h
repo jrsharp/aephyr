@@ -22,7 +22,7 @@
  */
 
 /**
- * @brief Callback for each successfully decoded DECT NR+ data frame.
+ * @brief Callback for each successfully decoded DECT NR+ PHY data frame.
  *
  * Invoked from the modem event-handler context. Keep it short and non-blocking
  * (queue the frame for a thread).
@@ -44,7 +44,7 @@ typedef void (*dect_phy_rx_cb_t)(const uint8_t *data, size_t len, int16_t rssi_d
  */
 int dect_phy_init(uint16_t *device_id);
 
-/** DECT NR+ broadcast receiver identity (accepted by every RX filter). */
+/** DECT NR+ PHY broadcast receiver identity (accepted by every RX filter). */
 #define DECT_PHY_BROADCAST_ID 0xFFFFU
 
 /** @brief Register the receive callback (NULL to disable). */
@@ -133,5 +133,27 @@ void dect_phy_get_stats(struct dect_phy_stats *out);
  * Any output pointer may be NULL.
  */
 void dect_phy_get_info(uint16_t *device_id, uint16_t *carrier, int8_t *tx_power);
+
+/** @brief A supported RF band as reported by the modem (via band_get). */
+struct dect_phy_band_info {
+	uint8_t  band_number;      /**< DECT NR+ band number (e.g. 9, 22). */
+	uint8_t  band_group_index; /**< 0 = ~2 GHz, 1 = ~1 GHz. */
+	uint8_t  power_class;      /**< Transmit power class. */
+	int8_t   rx_gain;          /**< Receiver sensitivity capability, dB. */
+	uint16_t min_carrier;      /**< Lowest valid carrier (channel) number. */
+	uint16_t max_carrier;      /**< Highest valid carrier (channel) number. */
+};
+
+/**
+ * @brief Copy the modem-reported supported bands (captured during init).
+ *
+ * Lets a caller confirm the exact carrier range and power class of each band
+ * on-device before transmitting.
+ *
+ * @param out Destination array, or NULL to just query the count.
+ * @param max Capacity of @p out.
+ * @return Number of band entries available (clamped to @p max when copying).
+ */
+uint8_t dect_phy_get_bands(struct dect_phy_band_info *out, uint8_t max);
 
 #endif /* AETHER_DRIVERS_DECT_PHY_H_ */

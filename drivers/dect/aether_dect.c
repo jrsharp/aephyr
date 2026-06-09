@@ -3,7 +3,7 @@
  *
  * SPDX-License-Identifier: MIT
  *
- * Æther DECT NR+ net-device driver. Mirrors the structure of the LoRa
+ * Æther net-device driver over the DECT NR+ PHY. Mirrors the structure of the LoRa
  * integration driver (aether_lora.c): a HeyMac L2 network device with RX and
  * radio threads feeding the same net_pkt/HeyMac plumbing, but backed by the
  * DECT NR+ PHY (dect_phy.c) instead of an SX126x over SPI.

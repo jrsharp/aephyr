@@ -52,6 +52,45 @@ BUILD_ASSERT(sizeof(union nrf_modem_dect_phy_hdr) >= sizeof(struct phy_ctrl_fiel
 BUILD_ASSERT(sizeof(((union nrf_modem_dect_phy_hdr *)0)->type_2) == 10,
 	     "unexpected DECT NR+ PHY Type 2 header size");
 
+/* DECT NR+ transport block sizes (in bits) indexed [MCS][packet_length], where
+ * packet_length is the 4-bit PHY-header field counted in subslots. From ETSI
+ * TS 103 636-3 section 5.3 (mirrors the NCS dect_shell dect_common_utils table).
+ * -1 = unsupported combination. We size each frame to the minimal packet_length
+ * whose block holds it, rather than a fixed CONFIG_AETHER_DECT_PACKET_LENGTH:
+ * a hello stays small, a full 9P/data frame scales its airtime up on its own.
+ * (LoRa had one packet size; DECT bills airtime per subslot, so right-size it.) */
+static const int16_t dect_tbs_bits[5][16] = {
+	/* MCS-0 */ { 0, 136, 264, 400, 536, 664, 792, 920, 1064, 1192, 1320, 1448, 1576, 1704, 1864, 1992 },
+	/* MCS-1 */ { 32, 296, 552, 824, 1096, 1352, 1608, 1864, 2104, 2360, 2616, 2872, 3128, 3384, 3704, 3960 },
+	/* MCS-2 */ { 56, 456, 856, 1256, 1640, 2024, 2360, 2744, 3192, 3576, 3960, 4320, 4768, 5152, 5536, -1 },
+	/* MCS-3 */ { 88, 616, 1128, 1672, 2168, 2680, 3192, 3704, 4256, 4768, 5280, -1, -1, -1, -1, -1 },
+	/* MCS-4 */ { 144, 936, 1736, 2488, 3256, 4024, 4832, 5600, -1, -1, -1, -1, -1, -1, -1, -1 },
+};
+
+/* Smallest subslot packet_length (0..15) whose transport block holds `len`
+ * bytes at `mcs`. Clamps to the largest block the MCS supports on overflow --
+ * the mesh caps payload at CONFIG_AETHER_MAX_PAYLOAD so that should not trip. */
+static uint8_t dect_phy_packet_length_for(size_t len, uint8_t mcs)
+{
+	uint8_t last = 0;
+
+	if (mcs >= 5) {
+		mcs = 0;
+	}
+	for (uint8_t pl = 0; pl < 16; pl++) {
+		int16_t bits = dect_tbs_bits[mcs][pl];
+
+		if (bits < 0) {
+			break;
+		}
+		last = pl;
+		if ((size_t)(bits / 8) >= len) {
+			return pl;
+		}
+	}
+	return last;
+}
+
 /* Synchronizes blocking calls (init/configure/activate, TX, RSSI) with their
  * modem completion event. Receive is asynchronous (see rx_done_sem) so it does
  * not contend on this.
@@ -391,9 +430,12 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 
 	memset(&phdr, 0, sizeof(phdr));
 
+	/* Size the PHY transport block to this frame (subslots), not a fixed value. */
+	uint8_t pkt_len = dect_phy_packet_length_for(len, CONFIG_AETHER_DECT_MCS);
+
 	if (addressed) {
 		/* Addressed Type 2 header: lets receivers filter in hardware. */
-		phdr.hdr_type_2.packet_length = CONFIG_AETHER_DECT_PACKET_LENGTH;
+		phdr.hdr_type_2.packet_length = pkt_len;
 		phdr.hdr_type_2.packet_length_type = 0;
 		phdr.hdr_type_2.header_format = 0;
 		phdr.hdr_type_2.short_network_id = (CONFIG_AETHER_DECT_NETWORK_ID & 0xff);
@@ -410,7 +452,7 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 
 		h1->header_format = 0x0;
 		h1->packet_length_type = 0x0;
-		h1->packet_length = CONFIG_AETHER_DECT_PACKET_LENGTH;
+		h1->packet_length = pkt_len;
 		h1->short_network_id = (CONFIG_AETHER_DECT_NETWORK_ID & 0xff);
 		h1->transmitter_id_hi = (tx_id() >> 8);
 		h1->transmitter_id_lo = (tx_id() & 0xff);

@@ -33,10 +33,13 @@ extern "C" {
 #define HEYMAC_FRM_TYPE_ACK     0x02
 #define HEYMAC_FRM_TYPE_MACCMD  0x03
 
-/* HeyMac Constants */
+/* HeyMac Constants.
+ * Frame/payload maxima are sized for the DECT NR+ PHY transport block (sized
+ * per-frame from the TBS tables), not the SX1262's 255-byte LoRa packet limit.
+ * 512 covers the largest block we transmit at MCS-1 (495 B). */
 #define HEYMAC_VERSION         0x01
-#define HEYMAC_MAX_FRAME_SIZE  255
-#define HEYMAC_MAX_PAYLOAD     220
+#define HEYMAC_MAX_FRAME_SIZE  512
+#define HEYMAC_MAX_PAYLOAD     480
 #define HEYMAC_ADDR_SHORT_LEN  2
 #define HEYMAC_ADDR_LONG_LEN   6
 

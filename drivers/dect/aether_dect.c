@@ -82,7 +82,9 @@ static atomic_t tx_paused;
  * synchronous send path are mutually exclusive under radio_lock, so one
  * buffer is safe.
  */
-static uint8_t tx_frame_buf[256];
+/* 512 holds the largest DECT NR+ transport block we transmit at MCS-1
+ * (16-subslot block = 495 bytes); NOT the LoRa SX1262 256-byte hard limit. */
+static uint8_t tx_frame_buf[512];
 
 /* Guard against silently truncating an outbound frame. */
 BUILD_ASSERT(sizeof(tx_frame_buf) >= HEYMAC_MAX_FRAME_SIZE,

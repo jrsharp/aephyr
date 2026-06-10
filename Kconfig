@@ -129,12 +129,16 @@ config AETHER_CONDITIONAL_NET_ID
 
 config AETHER_MAX_PAYLOAD
 	int "Maximum payload size"
-	default 200
-	range 32 255
+	default 448
+	range 32 480
 	help
-	  Maximum payload size for mesh packets. SX1262 supports up to
-	  255 bytes per LoRa packet. Larger payloads reduce fragmentation
-	  overhead for 9P transport.
+	  Maximum mesh datagram payload, in bytes. On DECT NR+ the PHY
+	  transport block is sized per-frame from the TBS tables, so this is
+	  bounded by the block the radio can carry at CONFIG_AETHER_DECT_MCS,
+	  not the old SX1262 255-byte LoRa packet limit. At MCS-1 the largest
+	  subslot block is 495 B; 448 leaves room for the HeyMac (~7 B) and
+	  mesh (~21 B) headers. Larger payloads mean a larger 9P msize and far
+	  fewer round-trips for 9P-over-Aether. (Was 200, a LoRa-era value.)
 
 choice AETHER_ROUTING
 	prompt "Mesh routing mode"

@@ -42,8 +42,11 @@ static uint16_t aether_get_network_id_fallback(struct net_if *iface)
 /* Global mesh context - one per interface */
 struct aether_mesh_ctx *g_mesh_ctx;
 
-/* Work queue stack for mesh operations - needs room for send_hello() nested calls */
-#define MESH_WORKQ_STACK_SIZE 1536
+/* Work queue stack for mesh operations - needs room for send_hello() nested
+ * calls, and (when raised via CONFIG_AETHER_MESH_WORKQ_STACK_SIZE) for an
+ * in-kernel reliable-datagram consumer that wakes a waiter from delivery
+ * context, e.g. the 9P client transport's per-conversation callback. */
+#define MESH_WORKQ_STACK_SIZE CONFIG_AETHER_MESH_WORKQ_STACK_SIZE
 K_THREAD_STACK_DEFINE(mesh_workq_stack, MESH_WORKQ_STACK_SIZE);
 
 /* Duplicate detection - ring buffer of recently seen (source, seq_no) pairs */

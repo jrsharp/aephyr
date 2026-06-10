@@ -189,6 +189,18 @@ config AETHER_SHELL
 	help
 	  Enable shell commands for Æther mesh debugging and control.
 
+config AETHER_MESH_WORKQ_STACK_SIZE
+	int "Mesh workqueue stack size (bytes)"
+	default 1536
+	help
+	  Stack for the mesh workqueue, which ticks the reliable engine and
+	  delivers received datagrams.  The default suits mesh/HeyMac work and
+	  best-effort consumers (e.g. chat).  Raise it on a node that consumes a
+	  reliable conversation in-kernel on this workqueue — e.g. the 9P client
+	  transport's per-conversation callback, which wakes the dialer (a
+	  scheduler operation) from delivery context.  4096 is comfortable for
+	  that; only raise it where the static DRAM is available.
+
 endif # AETHER_MESH
 
 config AETHER_LORA

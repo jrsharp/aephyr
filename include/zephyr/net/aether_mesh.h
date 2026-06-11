@@ -226,6 +226,34 @@ struct aether_lora_stats {
 void aether_lora_get_stats(struct aether_lora_stats *out);
 
 /**
+ * Runtime LoRa PHY parameters, settable live via /net/aether/phy.  The
+ * sf/bw/cr fields are the lora_datarate / lora_signal_bandwidth /
+ * lora_coding_rate enum values (SF7-12; BW 0=125/1=250/2=500 kHz; CR
+ * 1=4/5..4=4/8).  cad gates the pre-TX listen-before-talk check.
+ */
+struct aether_lora_phy {
+	uint8_t sf;
+	uint8_t bw;
+	uint8_t cr;
+	int8_t  tx_power;
+	bool    cad;
+};
+
+/** @brief Snapshot the current LoRa PHY parameters. */
+void aether_lora_get_phy(struct aether_lora_phy *out);
+
+/**
+ * @brief Apply LoRa PHY parameters at runtime.
+ *
+ * Updates the CAD gate immediately; if any modem parameter (sf/bw/cr/power)
+ * changed and the radio is running, re-applies the modem config live (pause
+ * TX, drop/re-arm RX) — best done while idle.  Both decks must match.
+ *
+ * @return 0 on success, -EINVAL on out-of-range input, or a driver error.
+ */
+int aether_lora_set_phy(const struct aether_lora_phy *in);
+
+/**
  * @brief Find route to destination
  *
  * @param iface Network interface

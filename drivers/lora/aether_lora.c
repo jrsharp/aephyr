@@ -50,6 +50,10 @@ struct aether_lora_ctx {
 	uint32_t tx_count;
 	int16_t  last_rssi;
 	int8_t   last_snr;
+
+	/* CAD listen-before-talk, runtime-toggled via /net/aether/phy
+	 * (seeded from CONFIG_AETHER_LORA_CAD_ENABLED at init). */
+	bool     cad_enabled;
 };
 
 /* Forward declarations */
@@ -99,10 +103,10 @@ static void aether_lora_rx_thread(void *p1, void *p2, void *p3)
 	LOG_DBG("Æther LoRa RX thread stopped");
 }
 
-#ifdef CONFIG_AETHER_LORA_CAD_ENABLED
 /**
  * CAD listen-before-talk check. Returns 0 when channel is clear or after
- * max retries (transmit anyway). Negative on hard error.
+ * max retries (transmit anyway). Negative on hard error.  Always compiled;
+ * the caller gates on ctx->cad_enabled (runtime, via /net/aether/phy).
  */
 static int aether_lora_cad_check(struct aether_lora_ctx *ctx)
 {
@@ -126,7 +130,6 @@ static int aether_lora_cad_check(struct aether_lora_ctx *ctx)
 		CONFIG_AETHER_LORA_CAD_MAX_RETRIES);
 	return 0;
 }
-#endif /* CONFIG_AETHER_LORA_CAD_ENABLED */
 
 /* LoRa TX thread */
 static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
@@ -190,9 +193,9 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 			k_msleep(200);  /* Allow radio to fully exit RX mode */
 		}
 
-#ifdef CONFIG_AETHER_LORA_CAD_ENABLED
-		aether_lora_cad_check(ctx);
-#endif
+		if (ctx->cad_enabled) {
+			aether_lora_cad_check(ctx);
+		}
 
 		/* Retry logic:
 		 * - EBUSY: modem busy, TX never started - retry immediately
@@ -276,9 +279,9 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 			k_msleep(200);
 		}
 
-#ifdef CONFIG_AETHER_LORA_CAD_ENABLED
-		aether_lora_cad_check(ctx);
-#endif
+		if (ctx->cad_enabled) {
+			aether_lora_cad_check(ctx);
+		}
 
 		/* Copy to DRAM staging buffer — SPI DMA requires DRAM source.
 		 * Callers (mesh send_reliable) may pass PSRAM pointers. */
@@ -321,6 +324,74 @@ void aether_lora_get_stats(struct aether_lora_stats *out)
 	out->tx_count = ctx->tx_count;
 	out->last_rssi = ctx->last_rssi;
 	out->last_snr = ctx->last_snr;
+}
+
+void aether_lora_get_phy(struct aether_lora_phy *out)
+{
+	struct aether_lora_ctx *ctx = &aether_lora_ctx_0;
+
+	if (!out) {
+		return;
+	}
+	out->sf = (uint8_t)ctx->modem_config.datarate;
+	out->bw = (uint8_t)ctx->modem_config.bandwidth;
+	out->cr = (uint8_t)ctx->modem_config.coding_rate;
+	out->tx_power = (int8_t)ctx->modem_config.tx_power;
+	out->cad = ctx->cad_enabled;
+}
+
+int aether_lora_set_phy(const struct aether_lora_phy *in)
+{
+	struct aether_lora_ctx *ctx = &aether_lora_ctx_0;
+	bool modem_changed;
+	int ret;
+
+	if (!in) {
+		return -EINVAL;
+	}
+	/* Validate against the lora_datarate / lora_signal_bandwidth /
+	 * lora_coding_rate enum ranges (SF7-12, BW 125/250/500, CR 4/5-4/8). */
+	if (in->sf < SF_7 || in->sf > SF_12 ||
+	    in->bw > BW_500_KHZ ||
+	    in->cr < CR_4_5 || in->cr > CR_4_8) {
+		return -EINVAL;
+	}
+
+	modem_changed = (ctx->modem_config.datarate != in->sf) ||
+			(ctx->modem_config.bandwidth != in->bw) ||
+			(ctx->modem_config.coding_rate != in->cr) ||
+			(ctx->modem_config.tx_power != in->tx_power);
+
+	/* CAD is just a pre-TX software gate — no radio reconfig needed. */
+	ctx->cad_enabled = in->cad;
+	ctx->modem_config.datarate = in->sf;
+	ctx->modem_config.bandwidth = in->bw;
+	ctx->modem_config.coding_rate = in->cr;
+	ctx->modem_config.tx_power = in->tx_power;
+
+	if (!modem_changed || !ctx->running) {
+		/* CAD-only change, or not started yet (applied at start()). */
+		return 0;
+	}
+
+	/* Re-apply the PHY live: pause TX, drop async RX, reconfigure the modem,
+	 * then re-arm RX.  Mirrors the TX thread's RX-stop/restart dance so a
+	 * concurrent send doesn't reconfigure mid-air.  Best done while idle. */
+	aether_lora_tx_pause();
+	lora_recv_async(ctx->lora_dev, NULL);
+	k_msleep(50);
+	ret = lora_config(ctx->lora_dev, &ctx->modem_config);
+	lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+	aether_lora_tx_resume();
+
+	if (ret < 0) {
+		LOG_ERR("PHY re-apply failed: %d", ret);
+	} else {
+		LOG_INF("PHY: SF%u BW%u CR%u pwr%d CAD %s",
+			in->sf, in->bw, in->cr, in->tx_power,
+			in->cad ? "on" : "off");
+	}
+	return ret;
 }
 
 int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err)
@@ -640,6 +711,7 @@ static int aether_lora_init(const struct device *dev)
 	ctx->modem_config.coding_rate = CONFIG_AETHER_LORA_CR;
 	ctx->modem_config.tx_power = CONFIG_AETHER_LORA_TX_POWER;
 	ctx->modem_config.tx = true;  /* Enable TX */
+	ctx->cad_enabled = IS_ENABLED(CONFIG_AETHER_LORA_CAD_ENABLED);
 
 	/* Initialize message queues */
 	k_msgq_init(&ctx->rx_msgq, ctx->rx_msgq_buffer, sizeof(struct net_pkt *),

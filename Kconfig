@@ -294,16 +294,21 @@ config AETHER_LORA_TX_POWER
 	  Default transmit power in dBm.
 
 config AETHER_LORA_CAD_ENABLED
-	bool "Enable CAD listen-before-talk"
-	default y
+	bool "Default state of CAD listen-before-talk"
+	default n
 	help
-	  Enable Channel Activity Detection (CAD) before each transmission.
-	  The SX1262 hardware detects LoRa preambles in ~16ms. If the channel
-	  is busy, the driver backs off and retries before transmitting.
+	  Boot default for Channel Activity Detection (CAD) before each
+	  transmission.  CAD is collision *avoidance* (the SX1262 detects LoRa
+	  preambles in ~16ms and backs off if the channel is busy); the reliable
+	  datagram engine already provides collision *recovery* via retransmit,
+	  so CAD is an optimization for contended/long-range meshes, not a
+	  correctness requirement.  Default off — best for short-range / few
+	  nodes (and avoids close-range self-deference).  This only seeds the
+	  runtime flag; flip it live via /net/aether/phy.  The CAD code is always
+	  compiled in so it can be enabled at runtime.
 
 config AETHER_LORA_CAD_MAX_RETRIES
 	int "Maximum CAD retry attempts"
-	depends on AETHER_LORA_CAD_ENABLED
 	default 5
 	range 1 10
 	help
@@ -312,7 +317,6 @@ config AETHER_LORA_CAD_MAX_RETRIES
 
 config AETHER_LORA_CAD_BACKOFF_MAX_MS
 	int "Maximum CAD backoff (ms)"
-	depends on AETHER_LORA_CAD_ENABLED
 	default 100
 	range 20 500
 	help

@@ -594,7 +594,24 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			net_pkt_pull(pkt, hdr_len);
 
 			size_t payload_len = net_pkt_get_len(pkt);
-			uint8_t *payload = pkt->buffer ? pkt->buffer->data : NULL;
+			/* Linearize the payload across net_buf fragments.
+			 * pkt->buffer->data is only the FIRST fragment
+			 * (CONFIG_NET_BUF_DATA_SIZE = 128); a payload that spans
+			 * fragments (LoRa frames > 128 B, e.g. 9P-over-Aether
+			 * file transfers) would otherwise read its tail from
+			 * stale pool memory — silent, deterministic corruption.
+			 * RX is serialized on the mesh workqueue, so a static
+			 * scratch buffer is safe. */
+			static uint8_t lin_payload[AETHER_MAX_PAYLOAD];
+			uint8_t *payload = NULL;
+
+			if (payload_len > 0 &&
+			    payload_len <= sizeof(lin_payload) && pkt->buffer) {
+				net_buf_linearize(lin_payload,
+						  sizeof(lin_payload),
+						  pkt->buffer, 0, payload_len);
+				payload = lin_payload;
+			}
 
 			if (reliable &&
 			    memcmp(hdr.dst, ctx->local_addr, 6) == 0) {

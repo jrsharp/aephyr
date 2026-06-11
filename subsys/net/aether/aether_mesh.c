@@ -486,7 +486,10 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		return;
 	}
 
-	/* Use the first buffer's data directly */
+	/* The mesh header (<= ~18 B) lives at the packet front, always within
+	 * the first net_buf fragment (>= 128 B), so parsing it directly from
+	 * pkt->buffer->data is safe — no cross-fragment read.  (The variable-
+	 * length *payload* is NOT: it's linearized below / in the ACK case.) */
 	if (!pkt->buffer) {
 		LOG_ERR("No buffer in packet");
 		net_pkt_unref(pkt);
@@ -654,9 +657,12 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 				break;
 			}
 			
-			/* Update mesh header with decremented TTL */
+			/* Update mesh header with decremented TTL in place.  TTL
+			 * is at offset 2 — within the first fragment — so the
+			 * direct write is frag-0-safe; the forwarded packet's full
+			 * payload is linearized by the TX path (net_pkt_read). */
 			if (pkt->buffer && pkt->buffer->data) {
-				pkt->buffer->data[2] = hdr.ttl;  /* TTL is at offset 2 in mesh header */
+				pkt->buffer->data[2] = hdr.ttl;
 			}
 			
 			/* Forward packet via L2 layer */
@@ -670,11 +676,19 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		/* Reliable-datagram acknowledgment (§4.6). Handle if for us;
 		 * multi-hop ACK forwarding is a TODO alongside RREQ/RREP. */
 		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
+			uint8_t ackbuf[16];
+			size_t alen;
+
 			net_pkt_pull(pkt, hdr_len);
-			size_t alen = net_pkt_get_len(pkt);
-			uint8_t *ab = pkt->buffer ? pkt->buffer->data : NULL;
-			if (ab && alen >= AETHER_ACK_LEN) {
-				aether_reliable_glue_rx_ack(hdr.src, ab,
+			alen = net_pkt_get_len(pkt);
+			/* Linearize rather than reading pkt->buffer->data with a
+			 * full-packet length (the bug that bit the DATA path):
+			 * ACKs fit one fragment today, but don't assume it. */
+			if (alen >= AETHER_ACK_LEN && alen <= sizeof(ackbuf) &&
+			    pkt->buffer) {
+				net_buf_linearize(ackbuf, sizeof(ackbuf),
+						  pkt->buffer, 0, alen);
+				aether_reliable_glue_rx_ack(hdr.src, ackbuf,
 							    (uint16_t)alen);
 			}
 		}

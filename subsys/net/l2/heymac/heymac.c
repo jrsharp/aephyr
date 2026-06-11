@@ -305,7 +305,10 @@ void heymac_recv(struct net_if *iface, struct net_pkt *pkt)
 		return;
 	}
 
-	/* Use the first buffer's data directly */
+	/* The HeyMac header lives at the packet front, always within the first
+	 * net_buf fragment (>= 128 B), so parsing it directly from
+	 * pkt->buffer->data is frag-0-safe — no cross-fragment read.  (The
+	 * payload is consumed downstream, where it's linearized.) */
 	if (!pkt->buffer) {
 		LOG_ERR("No buffer in packet");
 		ctx->rx_errors++;

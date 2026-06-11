@@ -161,10 +161,29 @@ static void honr_election_handler(struct k_work *work)
 
 	ARG_UNUSED(work);
 
-	if (ctx && !ctx->honr_joined) {
-		honr_become_root(ctx);
-		LOG_INF("HONR: no tree heard, self-elected root (id %08x)", honr_node_id);
+	if (!ctx || ctx->honr_joined) {
+		return;
 	}
+
+	/* Do NOT self-elect while a join is in flight. After a dual-root yield
+	 * (the higher node id relinquishes to join the lower one) we relinquish
+	 * AND re-arm this election; if it fires before the join completes we would
+	 * re-root, and the winner's JOIN_REP is then ignored (handle_ctrl drops it
+	 * when honr_joined) -- the classic dual-root oscillation that leaves BOTH
+	 * nodes root with a phantom child on the winner. So while a candidate is
+	 * seeded (collect window) or a JOIN_REQ is awaiting its reply, defer:
+	 * re-arm and let the join land. Once it does, honr_joined is set and we
+	 * never reach here; if it fails the pending window lapses and the next
+	 * election self-elects as before.
+	 */
+	if (honr_cand_valid ||
+	    (honr_join_pending_until != 0 && k_uptime_get() < honr_join_pending_until)) {
+		k_work_reschedule(&honr_election_work, K_MSEC(honr_election_delay_ms()));
+		return;
+	}
+
+	honr_become_root(ctx);
+	LOG_INF("HONR: no tree heard, self-elected root (id %08x)", honr_node_id);
 }
 
 /* Lost a root tiebreak: drop to unjoined and re-arm the election, so we join

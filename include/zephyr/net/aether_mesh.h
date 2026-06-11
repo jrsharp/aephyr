@@ -205,6 +205,27 @@ int aether_mesh_get_neighbor_count(struct net_if *iface);
 int aether_mesh_get_route_count(struct net_if *iface);
 
 /**
+ * @brief Radio-layer activity counters, for a status indicator / stats file.
+ *
+ * Maintained by the LoRa driver: every datagram it transmits or receives, plus
+ * the RSSI/SNR of the most recent receive.  Cheap to read (no allocation, no
+ * lock) so a UI chrome can poll it each refresh.
+ */
+struct aether_lora_stats {
+	uint32_t rx_count;   /* datagrams received off the air */
+	uint32_t tx_count;   /* datagrams transmitted */
+	int16_t  last_rssi;  /* dBm of the most recent receive */
+	int8_t   last_snr;   /* dB of the most recent receive */
+};
+
+/**
+ * @brief Snapshot the radio-layer activity counters.
+ *
+ * @param out Destination (zeroed if the radio is not yet running)
+ */
+void aether_lora_get_stats(struct aether_lora_stats *out);
+
+/**
  * @brief Find route to destination
  *
  * @param iface Network interface

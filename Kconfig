@@ -264,10 +264,13 @@ config AETHER_TX_THREAD_PRIO
 
 config AETHER_LORA_SF
 	int "Default spreading factor"
-	default 7
+	default 10
 	range 7 12
 	help
-	  Default LoRa spreading factor (SF7-SF12).
+	  Default LoRa spreading factor (SF7-SF12).  Lower = higher data rate /
+	  shorter air time / shorter range.  SF10 is the long-range default;
+	  drop to 7 (e.g. via a build overlay) for high-throughput short-range
+	  use such as in-lab testing.
 
 config AETHER_LORA_BW
 	int "Default bandwidth"

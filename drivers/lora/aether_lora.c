@@ -13,6 +13,7 @@ LOG_MODULE_REGISTER(aether_lora, CONFIG_AETHER_LORA_LOG_LEVEL);
 #include <zephyr/net/net_if.h>
 #include <zephyr/net/net_pkt.h>
 #include <zephyr/net/heymac.h>
+#include <zephyr/net/aether_mesh.h>
 #include <zephyr/sys/atomic.h>
 #include <zephyr/sys/ring_buffer.h>
 #include <zephyr/random/random.h>
@@ -43,6 +44,12 @@ struct aether_lora_ctx {
 	struct lora_modem_config modem_config;
 
 	bool running;
+
+	/* Radio activity counters (read via aether_lora_get_stats). */
+	uint32_t rx_count;
+	uint32_t tx_count;
+	int16_t  last_rssi;
+	int8_t   last_snr;
 };
 
 /* Forward declarations */
@@ -194,6 +201,7 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 		ret = lora_send(ctx->lora_dev, data, len);
 
 		if (ret == 0) {
+			ctx->tx_count++;
 			LOG_DBG("LoRa packet transmitted, len=%zu", len);
 		} else if (ret == -EBUSY) {
 			/* Modem busy - wait and retry */
@@ -282,6 +290,7 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 		lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
 
 		if (ret == 0) {
+			ctx->tx_count++;
 			LOG_DBG("Sync TX success, len=%zu, attempts=%d", len, attempt + 1);
 			return 0;
 		}
@@ -295,6 +304,23 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 
 	LOG_ERR("Sync TX failed after %d attempts: %d", max_retries, ret);
 	return ret;
+}
+
+void aether_lora_get_stats(struct aether_lora_stats *out)
+{
+	struct aether_lora_ctx *ctx = &aether_lora_ctx_0;
+
+	if (!out) {
+		return;
+	}
+	if (!ctx->running) {
+		memset(out, 0, sizeof(*out));
+		return;
+	}
+	out->rx_count = ctx->rx_count;
+	out->tx_count = ctx->tx_count;
+	out->last_rssi = ctx->last_rssi;
+	out->last_snr = ctx->last_snr;
 }
 
 int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err)
@@ -361,8 +387,12 @@ static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
 	int ret;
 
 	ARG_UNUSED(dev);
-	ARG_UNUSED(rssi);
-	ARG_UNUSED(snr);
+
+	/* Radio-activity stats: a received datagram off the air, plus its signal
+	 * quality — surfaced by the status indicator and /net/aether/stats. */
+	ctx->rx_count++;
+	ctx->last_rssi = rssi;
+	ctx->last_snr = snr;
 
 	if (!ctx->iface || !data || size == 0) {
 		LOG_ERR("Invalid RX callback parameters");
@@ -598,12 +628,16 @@ static int aether_lora_init(const struct device *dev)
 	ctx->lora_dev = lora_dev;
 	ctx->running = false;
 
-	/* Initialize default modem configuration */
+	/* Modem configuration — spreading factor / bandwidth / coding rate come
+	 * from Kconfig (CONFIG_AETHER_LORA_SF/BW/CR) so the air-rate is tunable
+	 * per build: long-range defaults (SF10/BW125) vs short-range high-rate
+	 * for in-lab (SF7/BW500).  The CONFIG ints map 1:1 onto the lora_datarate
+	 * / lora_signal_bandwidth / lora_coding_rate enums. */
 	ctx->modem_config.frequency = 915000000;  /* 915 MHz */
-	ctx->modem_config.bandwidth = BW_125_KHZ;
-	ctx->modem_config.datarate = SF_10;  /* Use SF10 as it works reliably */
+	ctx->modem_config.bandwidth = CONFIG_AETHER_LORA_BW;
+	ctx->modem_config.datarate = CONFIG_AETHER_LORA_SF;
 	ctx->modem_config.preamble_len = 16;  /* 16 symbols for half-duplex turnaround margin */
-	ctx->modem_config.coding_rate = CR_4_5;
+	ctx->modem_config.coding_rate = CONFIG_AETHER_LORA_CR;
 	ctx->modem_config.tx_power = CONFIG_AETHER_LORA_TX_POWER;
 	ctx->modem_config.tx = true;  /* Enable TX */
 

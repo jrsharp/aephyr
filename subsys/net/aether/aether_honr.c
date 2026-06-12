@@ -21,6 +21,7 @@ LOG_MODULE_REGISTER(aether_honr, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/net/aether_mesh.h>
 #include <zephyr/net/honr.h>
 #include <zephyr/drivers/hwinfo.h>
+#include <zephyr/random/random.h>
 #include <string.h>
 #include <errno.h>
 
@@ -134,6 +135,23 @@ static uint32_t honr_election_delay_ms(void)
 {
 	return CONFIG_AETHER_HONR_ELECTION_BASE_MS +
 	       (honr_node_id % CONFIG_AETHER_HONR_ELECTION_JITTER_MS);
+}
+
+/* Jittered next-announce delay: a deterministic per-node slot offset (so nodes
+ * booted in lockstep spread across the interval) plus small random fine jitter
+ * (to break ties), mirroring the HELLO beacon's staggering. Without it, two
+ * nodes powered up together announce at the SAME instant every interval, never
+ * hear each other's TREE_ANNOUNCE, and the dual-root tiebreak never fires -> both
+ * stay root. (HELLO populates neighbors but TREE_ANNOUNCE drives convergence.) */
+static uint32_t honr_announce_delay_ms(void)
+{
+	int32_t base = (int32_t)CONFIG_AETHER_HONR_ANNOUNCE_INTERVAL_SECONDS * 1000;
+	int32_t slot = base / 4;                                   /* spread ±25% */
+	int32_t off = (int32_t)(honr_node_id % (uint32_t)(2 * slot)) - slot;
+	int32_t jit = (int32_t)(sys_rand32_get() % 1000) - 500;    /* fine ±0.5s */
+	int32_t ms = base + off + jit;
+
+	return ms < 1000 ? 1000U : (uint32_t)ms;
 }
 
 /* How long a non-root node tolerates silence from its parent before declaring
@@ -298,8 +316,7 @@ static void honr_announce_handler(struct k_work *work)
 		(void)honr_send_ctrl(honr_iface, AETHER_MSG_TREE_ANNOUNCE, p, sizeof(p));
 	}
 
-	k_work_reschedule(&honr_announce_work,
-			  K_SECONDS(CONFIG_AETHER_HONR_ANNOUNCE_INTERVAL_SECONDS));
+	k_work_reschedule(&honr_announce_work, K_MSEC(honr_announce_delay_ms()));
 }
 
 /* Commit the join: request an address from the shallowest parent heard during
@@ -376,7 +393,8 @@ void aether_honr_join_init(struct net_if *iface)
 			honr_node_id, honr_election_delay_ms());
 	}
 
-	k_work_schedule(&honr_announce_work, K_SECONDS(2));
+	/* First announce is jittered too, so co-booted nodes don't start in phase. */
+	k_work_schedule(&honr_announce_work, K_MSEC(honr_announce_delay_ms()));
 }
 
 void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t src[6],

@@ -128,6 +128,12 @@ struct aether_mesh_ctx {
 	 */
 	uint16_t honr_addr;
 	uint16_t honr_child_bitmap;  /* bit n (1..14) set = child nibble allocated */
+	/* EUI of the node holding each allocated child nibble (index = nibble,
+	 * 1..14; [0] unused). Lets a re-joining child reclaim its existing address
+	 * by EUI instead of being handed a fresh nibble every time -- otherwise a
+	 * stable node that briefly orphans walks the address space and exhausts the
+	 * 14 child slots. Sized 15 = HONR_CHILD_MAX(0xE) + 1 (honr.h not included). */
+	uint8_t honr_child_eui[15][6];
 	bool honr_joined;
 
 	/* Stable unique node identity (the pre-HONR local_addr derived from the

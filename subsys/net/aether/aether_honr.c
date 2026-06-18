@@ -229,11 +229,29 @@ static uint16_t honr_free_children(const struct aether_mesh_ctx *ctx)
 	return (uint16_t)(~ctx->honr_child_bitmap) & HONR_CHILD_MASK;
 }
 
-static int honr_alloc_child(struct aether_mesh_ctx *ctx)
+/* Allocate (or reclaim) a child nibble for the joiner identified by eui.
+ *
+ * A node that briefly orphans (e.g. missed a few parent announces under the
+ * half-duplex RX/LBT timing) re-sends a JOIN_REQ while still powered. Without
+ * identity tracking the parent handed out a NEW nibble every time and never
+ * freed the old one, so a stable node walked the address space (5000 -> 7000
+ * -> ...) and eventually exhausted the 14 child slots. Reclaim-by-EUI makes a
+ * re-join idempotent: the returning node keeps its existing address.
+ */
+static int honr_alloc_child(struct aether_mesh_ctx *ctx, const uint8_t eui[6])
 {
+	/* Reclaim: this EUI already holds a slot -> return its existing nibble. */
+	for (unsigned int n = HONR_CHILD_MIN; n <= HONR_CHILD_MAX; n++) {
+		if ((ctx->honr_child_bitmap & BIT(n)) &&
+		    memcmp(ctx->honr_child_eui[n], eui, 6) == 0) {
+			return (int)n;
+		}
+	}
+	/* Otherwise hand out the first free nibble and record the owner. */
 	for (unsigned int n = HONR_CHILD_MIN; n <= HONR_CHILD_MAX; n++) {
 		if (!(ctx->honr_child_bitmap & BIT(n))) {
 			ctx->honr_child_bitmap |= BIT(n);
+			memcpy(ctx->honr_child_eui[n], eui, 6);
 			return (int)n;
 		}
 	}
@@ -525,7 +543,7 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 		if (honr_rank(ctx->honr_addr) >= HONR_NIBBLES) {
 			break; /* no depth left */
 		}
-		nibble = honr_alloc_child(ctx);
+		nibble = honr_alloc_child(ctx, payload); /* payload[0..5] = joiner EUI */
 		if (nibble < 0) {
 			break; /* full */
 		}

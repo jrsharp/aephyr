@@ -86,6 +86,34 @@ static int cmd_dect_stats(const struct shell *sh, size_t argc, char **argv)
 	return 0;
 }
 
+static int cmd_dect_txpower(const struct shell *sh, size_t argc, char **argv)
+{
+	uint16_t device_id, carrier;
+	int8_t tx_power;
+	int idx;
+
+	/* No arg: report the current index. */
+	if (argc < 2) {
+		dect_phy_get_info(&device_id, &carrier, &tx_power);
+		shell_print(sh, "tx power index %d", tx_power);
+		return 0;
+	}
+
+	idx = atoi(argv[1]);
+	if (idx < 0 || idx > 15) {
+		shell_error(sh, "tx power index must be 0-15 (ETSI TS 103 636-4 "
+			    "power-table index; lower = less power)");
+		return -EINVAL;
+	}
+
+	/* Takes effect on the next transmission (the index is written into each
+	 * frame's PHY control header). Runtime knob for field range tuning;
+	 * not persisted -- reverts to CONFIG_AETHER_DECT_TX_POWER on reboot. */
+	dect_phy_set_tx_power((int8_t)idx);
+	shell_print(sh, "tx power index -> %d (applies to next TX; not persisted)", idx);
+	return 0;
+}
+
 static int cmd_dect_cad(const struct shell *sh, size_t argc, char **argv)
 {
 	int count = 10;
@@ -118,6 +146,8 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_dect,
 	SHELL_CMD(bands, NULL, "Show modem-reported bands (carrier ranges, power class)",
 		  cmd_dect_bands),
 	SHELL_CMD(stats, NULL, "Show DECT NR+ PHY tx/rx statistics", cmd_dect_stats),
+	SHELL_CMD_ARG(txpower, NULL, "Get/set TX power index 0-15 (runtime; field range tuning)",
+		      cmd_dect_txpower, 1, 1),
 	SHELL_CMD_ARG(cad, NULL, "Probe channel activity [count=10]", cmd_dect_cad, 1, 1),
 	SHELL_SUBCMD_SET_END
 );

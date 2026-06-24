@@ -597,12 +597,41 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			ctx->local_addr[2], ctx->local_addr[3],
 			ctx->local_addr[4], ctx->local_addr[5]);
 		/* Check if packet is for us */
-		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0 ||
-		    memcmp(hdr.dst, "\xff\xff\xff\xff\xff\xff", 6) == 0) {
+		bool dst_is_bcast =
+			memcmp(hdr.dst, "\xff\xff\xff\xff\xff\xff", 6) == 0;
+		bool src_is_self = memcmp(hdr.src, ctx->local_addr, 6) == 0;
+
+		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0 || dst_is_bcast) {
+			/* Our own broadcast echoed back by a relay: ignore (we already
+			 * delivered/displayed it locally when we originated it). */
+			if (dst_is_bcast && src_is_self) {
+				net_pkt_unref(pkt);
+				break;
+			}
 			/* Unicast datagram for us: ACK it before delivering (stop-and-wait
 			 * ARQ). Broadcasts are not ACKed (no single acker). */
-			if (memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
+			if (!dst_is_bcast) {
 				aether_mesh_send_ack(iface, hdr.src, hdr.seq_no);
+			}
+			/* Broadcast re-flood: party-line / broadcast traffic must traverse
+			 * multiple hops. The mesh layer otherwise only relays unicast (via
+			 * HONR next-hop), so a broadcast was delivered locally and dropped
+			 * -- 1-hop only. Relay it onward with TTL-1 as another broadcast.
+			 * Storm-safe: the recv-top dedup (is_duplicate, recorded on first
+			 * sight) makes each node re-flood a given (src,seq) at most once;
+			 * own echoes are dropped above; TTL bounds the flood. */
+			if (dst_is_bcast && hdr.ttl > 1) {
+				struct net_pkt *fwd = net_pkt_clone(pkt, K_NO_WAIT);
+
+				if (fwd) {
+					if (fwd->buffer && fwd->buffer->data) {
+						fwd->buffer->data[2] = hdr.ttl - 1; /* TTL at off 2 */
+					}
+					/* Unset link dst -> driver re-broadcasts (type-1). */
+					net_pkt_lladdr_dst(fwd)->len = 0;
+					net_if_queue_tx(iface, fwd);
+					ctx->packets_forwarded++;
+				}
 			}
 			/* Remove mesh header */
 			net_pkt_pull(pkt, hdr_len);

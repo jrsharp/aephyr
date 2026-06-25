@@ -441,6 +441,12 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 		peer_id = ((uint32_t)payload[4] << 24) | ((uint32_t)payload[5] << 16) |
 			  ((uint32_t)payload[6] << 8) | payload[7];
 
+		/* Record the announcer's stable node_id against its neighbor entry
+		 * (the neighbor was just (re)created by the recv-path update). Lets
+		 * peer discovery via dev/aether/neighbors carry a durable identity
+		 * that survives the announcer's HONR address churn. */
+		aether_mesh_set_neighbor_node_id(iface, src, peer_id);
+
 		/* Dual-root resolution: if we are root and hear another root
 		 * (address 0x0000), the lower node id keeps it and the higher one
 		 * relinquishes and rejoins under the winner.

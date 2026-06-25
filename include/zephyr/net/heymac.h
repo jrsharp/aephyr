@@ -121,6 +121,8 @@ struct heymac_context {
 	uint16_t net_id;
 	struct heymac_addr local_addr;
 	struct heymac_addr last_rx_src;  /* immediate sender of last RX frame (HONR resender) */
+	int8_t last_rx_rssi;             /* real RSSI (dBm) of last RX frame, from the PHY */
+	int8_t last_rx_snr;              /* real SNR (dB) of last RX frame, from the PHY */
 	uint8_t tx_seq_no;
 	
 	/* Statistics */

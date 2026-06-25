@@ -416,7 +416,7 @@ static void aether_route_maintenance_handler(struct k_work *work)
 
 /* Neighbor management */
 int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
-                                int8_t rssi, uint8_t lqi)
+                                int8_t rssi, int8_t snr)
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
 	int i, free_slot = -1;
@@ -431,9 +431,9 @@ int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
 	for (i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
 		if (ctx->neighbors[i].active &&
 		    memcmp(ctx->neighbors[i].addr, addr, 6) == 0) {
-			/* Update existing neighbor */
+			/* Update existing neighbor (node_id preserved -- set via announce) */
 			ctx->neighbors[i].rssi = rssi;
-			ctx->neighbors[i].lqi = lqi;
+			ctx->neighbors[i].snr = snr;
 			ctx->neighbors[i].last_seen = k_uptime_get_32();
 			k_mutex_unlock(&ctx->neighbor_lock);
 			return 0;
@@ -446,8 +446,10 @@ int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
 	/* Add new neighbor */
 	if (free_slot >= 0) {
 		memcpy(ctx->neighbors[free_slot].addr, addr, 6);
+		ctx->neighbors[free_slot].node_id = 0;  /* learned later from TREE_ANNOUNCE */
 		ctx->neighbors[free_slot].rssi = rssi;
-		ctx->neighbors[free_slot].lqi = lqi;
+		ctx->neighbors[free_slot].snr = snr;
+		ctx->neighbors[free_slot].lqi = 0;
 		ctx->neighbors[free_slot].last_seen = k_uptime_get_32();
 		ctx->neighbors[free_slot].seq_no = 0;
 		ctx->neighbors[free_slot].active = true;
@@ -458,6 +460,26 @@ int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
 
 	k_mutex_unlock(&ctx->neighbor_lock);
 	return (free_slot >= 0) ? 0 : -ENOMEM;
+}
+
+void aether_mesh_set_neighbor_node_id(struct net_if *iface, const uint8_t addr[6],
+				      uint32_t node_id)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	if (!ctx || ctx->iface != iface || !addr || node_id == 0) {
+		return;
+	}
+
+	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
+		if (ctx->neighbors[i].active &&
+		    memcmp(ctx->neighbors[i].addr, addr, 6) == 0) {
+			ctx->neighbors[i].node_id = node_id;
+			break;
+		}
+	}
+	k_mutex_unlock(&ctx->neighbor_lock);
 }
 
 /* Packet reception */
@@ -534,7 +556,15 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 	}
 
 	/* Update neighbor information from source */
-	aether_mesh_update_neighbor(iface, hdr.src, -50, 255);  /* TODO: get real RSSI/LQI */
+	/* Real RSSI/SNR from the PHY: the driver stashed it on the heymac context
+	 * for this frame (set in the single-threaded RX path right before recv). */
+	{
+		struct heymac_context *hm_rx = net_if_l2_data(iface);
+
+		aether_mesh_update_neighbor(iface, hdr.src,
+					    hm_rx ? hm_rx->last_rx_rssi : 0,
+					    hm_rx ? hm_rx->last_rx_snr : 0);
+	}
 
 	/* Handle different message types */
 	switch (hdr.type) {

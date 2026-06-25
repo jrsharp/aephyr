@@ -84,9 +84,12 @@ struct aether_mesh_hdr {
 
 /* Neighbor entry */
 struct aether_neighbor {
-	uint8_t addr[6];        /* Neighbor address */
-	int8_t rssi;           /* Signal strength */
-	uint8_t lqi;           /* Link quality */
+	uint8_t addr[6];        /* Neighbor (HONR/short) address -- mutable across re-join */
+	uint32_t node_id;       /* Stable peer identity (from TREE_ANNOUNCE); 0 = unknown.
+				 * Survives HONR address churn -- use for durable peer refs. */
+	int8_t rssi;           /* Real RSSI (dBm) of last RX from this neighbor */
+	int8_t snr;            /* Real SNR (dB) of last RX from this neighbor */
+	uint8_t lqi;           /* Link quality (unused on DECT; SNR is the metric) */
 	uint32_t last_seen;    /* Timestamp of last contact */
 	uint16_t seq_no;       /* Last sequence number */
 	bool active;           /* Neighbor is active */
@@ -235,16 +238,29 @@ int aether_mesh_find_route(struct net_if *iface, const uint8_t dst[6],
                            uint8_t next_hop[6]);
 
 /**
- * @brief Add or update neighbor
+ * @brief Add or update neighbor with real link quality from the PHY
  *
  * @param iface Network interface
  * @param addr Neighbor address
- * @param rssi Signal strength
- * @param lqi Link quality
+ * @param rssi Real RSSI (dBm) of the received frame
+ * @param snr Real SNR (dB) of the received frame
  * @return 0 on success, negative error code otherwise
  */
 int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
-                                int8_t rssi, uint8_t lqi);
+                                int8_t rssi, int8_t snr);
+
+/**
+ * @brief Record a neighbor's stable node identity (from TREE_ANNOUNCE)
+ *
+ * The neighbor's HONR address is mutable across re-join; node_id is stable.
+ * No-op if the neighbor isn't in the table yet.
+ *
+ * @param iface Network interface
+ * @param addr Neighbor (HONR) address
+ * @param node_id Stable node identity
+ */
+void aether_mesh_set_neighbor_node_id(struct net_if *iface, const uint8_t addr[6],
+                                      uint32_t node_id);
 
 /**
  * @brief Add or update route

@@ -40,6 +40,15 @@ LOG_MODULE_REGISTER(aether_dect, CONFIG_AETHER_DECT_LOG_LEVEL);
 extern struct aether_mesh_ctx *g_mesh_ctx;
 #endif
 
+/* RX queue element: the received packet plus the PHY link quality for that
+ * frame, so the real RSSI/SNR travels with the packet to the (single-threaded)
+ * RX thread, which stashes it on the heymac context just before recv. */
+struct aether_dect_rx_item {
+	struct net_pkt *pkt;
+	int8_t rssi;
+	int8_t snr;
+};
+
 /* Æther DECT driver context. */
 struct aether_dect_ctx {
 	struct net_if *iface;
@@ -50,10 +59,10 @@ struct aether_dect_ctx {
 	K_KERNEL_STACK_MEMBER(rx_stack, CONFIG_AETHER_DECT_RX_STACK_SIZE);
 	K_KERNEL_STACK_MEMBER(radio_stack, CONFIG_AETHER_DECT_TX_STACK_SIZE);
 
-	/* Message queues (store net_pkt pointers). */
+	/* Message queues. RX carries rx_item (pkt + link quality); TX is net_pkt ptrs. */
 	struct k_msgq rx_msgq;
 	struct k_msgq tx_msgq;
-	char rx_msgq_buffer[CONFIG_AETHER_DECT_RX_QUEUE_SIZE * sizeof(struct net_pkt *)];
+	char rx_msgq_buffer[CONFIG_AETHER_DECT_RX_QUEUE_SIZE * sizeof(struct aether_dect_rx_item)];
 	char tx_msgq_buffer[CONFIG_AETHER_DECT_TX_QUEUE_SIZE * sizeof(struct net_pkt *)];
 
 	/* Serializes access to the single half-duplex radio between the radio
@@ -127,7 +136,7 @@ static int aether_dect_radio_tx(struct aether_dect_ctx *ctx, const uint8_t *data
 static void aether_dect_rx_thread(void *p1, void *p2, void *p3)
 {
 	struct aether_dect_ctx *ctx = (struct aether_dect_ctx *)p1;
-	struct net_pkt *pkt;
+	struct aether_dect_rx_item item;
 	int ret;
 
 	ARG_UNUSED(p2);
@@ -136,12 +145,22 @@ static void aether_dect_rx_thread(void *p1, void *p2, void *p3)
 	LOG_DBG("Æther DECT RX thread started");
 
 	while (ctx->running) {
-		ret = k_msgq_get(&ctx->rx_msgq, &pkt, K_FOREVER);
-		if (ret < 0 || !pkt) {
+		ret = k_msgq_get(&ctx->rx_msgq, &item, K_FOREVER);
+		if (ret < 0 || !item.pkt) {
 			continue;
 		}
 
-		heymac_recv(ctx->iface, pkt);
+		/* Stash this frame's real link quality on the heymac context so the
+		 * mesh recv (called synchronously below) can attribute it to the
+		 * sender's neighbor entry. Single-threaded here -> no race. */
+		struct heymac_context *hc = net_if_l2_data(ctx->iface);
+
+		if (hc) {
+			hc->last_rx_rssi = item.rssi;
+			hc->last_rx_snr = item.snr;
+		}
+
+		heymac_recv(ctx->iface, item.pkt);
 	}
 
 	LOG_DBG("Æther DECT RX thread stopped");
@@ -347,7 +366,12 @@ static void aether_dect_rx_callback(const uint8_t *data, size_t len, int16_t rss
 
 	net_pkt_cursor_init(pkt);
 
-	ret = k_msgq_put(&ctx->rx_msgq, &pkt, K_NO_WAIT);
+	/* Carry the PHY link quality with the packet. rssi_dbm is int16 from the
+	 * modem; real values (~-30..-110 dBm) fit int8 -- clamp defensively. */
+	int16_t r = rssi_dbm < -128 ? -128 : (rssi_dbm > 127 ? 127 : rssi_dbm);
+	struct aether_dect_rx_item item = { .pkt = pkt, .rssi = (int8_t)r, .snr = snr_db };
+
+	ret = k_msgq_put(&ctx->rx_msgq, &item, K_NO_WAIT);
 	if (ret < 0) {
 		LOG_ERR("RX queue full, dropping packet");
 		heymac_ctx->rx_errors++;
@@ -511,7 +535,7 @@ static int aether_dect_init(const struct device *dev)
 	ctx->running = false;
 	k_mutex_init(&ctx->radio_lock);
 
-	k_msgq_init(&ctx->rx_msgq, ctx->rx_msgq_buffer, sizeof(struct net_pkt *),
+	k_msgq_init(&ctx->rx_msgq, ctx->rx_msgq_buffer, sizeof(struct aether_dect_rx_item),
 		    CONFIG_AETHER_DECT_RX_QUEUE_SIZE);
 	k_msgq_init(&ctx->tx_msgq, ctx->tx_msgq_buffer, sizeof(struct net_pkt *),
 		    CONFIG_AETHER_DECT_TX_QUEUE_SIZE);

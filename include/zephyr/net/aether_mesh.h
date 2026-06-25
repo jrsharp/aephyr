@@ -117,7 +117,7 @@ struct aether_route {
 typedef void (*aether_mesh_recv_cb_t)(struct net_if *iface,
 				      const uint8_t src[6],
 				      const uint8_t *data, size_t len,
-				      void *user_data);
+				      bool broadcast, void *user_data);
 
 /* Æther mesh context */
 struct aether_mesh_ctx {

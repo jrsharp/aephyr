@@ -678,7 +678,8 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 
 				if (payload && payload_len > 0) {
 					for (uint8_t cbi = 0; cbi < ctx->recv_cb_count; cbi++) {
-						ctx->recv_cbs[cbi](iface, hdr.src, payload, payload_len, ctx->recv_cb_users[cbi]);
+						ctx->recv_cbs[cbi](iface, hdr.src, payload, payload_len,
+								   dst_is_bcast, ctx->recv_cb_users[cbi]);
 					}
 				}
 			}

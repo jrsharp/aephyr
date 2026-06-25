@@ -139,13 +139,13 @@ struct aether_mesh_ctx {
 	uint8_t honr_child_eui[15][6];
 	bool honr_joined;
 
-	/* Stable unique node identity (the pre-HONR local_addr derived from the
-	 * HeyMac short address), captured before HONR address assignment can
-	 * overwrite local_addr[4..5]. Used as the joiner id in the tree-join
-	 * handshake: when a node is root or unjoined its HONR address is 0x0000,
-	 * which (with the high bytes already zero) makes local_addr all-zeros and
-	 * indistinguishable between nodes -- breaking the join. node_eui stays
-	 * unique regardless of HONR state. */
+	/* Durable per-boot node identity -- the endpoint address exposed on
+	 * /net/aether and stamped as the source of broadcast (party-line) frames.
+	 * Generated once at boot (random, locally-administered unicast; CGA-ready),
+	 * deliberately decoupled from the HONR routing address (local_addr) which
+	 * churns with the tree. Also the joiner id in the tree-join handshake (must
+	 * stay unique while the HONR address is 0x0000 for root/unjoined). Use this,
+	 * never local_addr, whenever a *stable* reference to this node is needed. */
 	uint8_t node_eui[6];
 
 	/* Application receive callback */

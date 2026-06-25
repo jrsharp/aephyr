@@ -323,11 +323,15 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 #endif
 	}
 
-	/* Build mesh header */
+	/* Build mesh header. Broadcast (party-line) frames carry the durable node
+	 * identity as src so receivers learn a *stable* sender -- the HONR routing
+	 * address churns and the root's is always 0x0000, which breaks chat keying,
+	 * dedup, and the own-echo guard. Unicast keeps the HONR src (it doubles as
+	 * the routing/reply address until the unicast path is likewise decoupled). */
 	memset(&hdr, 0, sizeof(hdr));
 	hdr.type = AETHER_MSG_DATA;
 	hdr.ttl = CONFIG_AETHER_DEFAULT_TTL;
-	memcpy(hdr.src, ctx->local_addr, 6);
+	memcpy(hdr.src, is_broadcast ? ctx->node_eui : ctx->local_addr, 6);
 	memcpy(hdr.dst, dst, 6);
 	hdr.seq_no = ctx->seq_no++;
 	hdr.qos_security = (priority << 6) | (AETHER_DELIV_BESTEFFORT << 5);

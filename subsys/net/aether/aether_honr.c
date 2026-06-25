@@ -22,6 +22,9 @@ LOG_MODULE_REGISTER(aether_honr, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/net/honr.h>
 #include <zephyr/drivers/hwinfo.h>
 #include <zephyr/random/random.h>
+#ifdef CONFIG_NET_L2_HEYMAC
+#include <zephyr/net/heymac.h>
+#endif
 #include <string.h>
 #include <errno.h>
 
@@ -374,11 +377,23 @@ void aether_honr_join_init(struct net_if *iface)
 	uint8_t hwid[8];
 	ssize_t hlen;
 
-	/* Capture the stable unique node identity BEFORE the election/forced-root
-	 * can overwrite local_addr[4..5] with the HONR address. This is the joiner
-	 * id used in the tree-join handshake, so it stays unique even while the
-	 * HONR address is 0x0000 (root/unjoined). */
-	memcpy(ctx->node_eui, ctx->local_addr, 6);
+	/* The durable per-boot node identity -- the *endpoint* address exposed on
+	 * /net/aether -- is the HeyMac 6-byte identity (the canonical source of
+	 * truth; on DECT the 16-bit link address is its low-order slice). It is kept
+	 * strictly separate from the HONR *routing* address (local_addr, which
+	 * churns with the tree) and also serves as the joiner id in the tree-join
+	 * handshake (must stay unique while the HONR address is 0x0000 for
+	 * root/unjoined). */
+#ifdef CONFIG_NET_L2_HEYMAC
+	if (heymac_get_identity(iface, ctx->node_eui) < 0) {
+		(void)sys_rand_get(ctx->node_eui, 6);
+		ctx->node_eui[0] = (uint8_t)((ctx->node_eui[0] | 0x02) & 0xFE);
+	}
+#else
+	/* Non-HeyMac transport: no link MAC to borrow; random-at-boot identity. */
+	(void)sys_rand_get(ctx->node_eui, 6);
+	ctx->node_eui[0] = (uint8_t)((ctx->node_eui[0] | 0x02) & 0xFE);
+#endif
 
 	honr_iface = iface;
 	ctx->honr_child_bitmap = 0;

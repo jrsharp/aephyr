@@ -166,19 +166,27 @@ int heymac_init(struct net_if *iface)
 	ctx->tx_seq_no = sys_rand32_get() & 0xFF;
 	ctx->state = HEYMAC_STATE_INITIAL;
 	
-	/* Initialize local address */
-#if CONFIG_HEYMAC_USE_SHORT_ADDR
-	ctx->local_addr.type = 0;  /* Short address */
-	ctx->local_addr.short_addr[0] = sys_rand32_get() & 0xFF;
-	ctx->local_addr.short_addr[1] = sys_rand32_get() & 0xFF;
-#else
-	ctx->local_addr.type = 1;  /* Long address */
-	/* Generate random MAC-like address */
-	for (int i = 0; i < HEYMAC_ADDR_LONG_LEN; i++) {
-		ctx->local_addr.long_addr[i] = sys_rand32_get() & 0xFF;
+	/* Mint the canonical 6-byte node identity ONCE -- the durable address the
+	 * whole stack treats as the Æther address. Random at boot, locally-
+	 * administered + unicast (so it is never the all-ones broadcast). CGA slot:
+	 * load a persisted Cryptographically Generated Address here instead when
+	 * one exists. */
+	for (int i = 0; i < 6; i++) {
+		ctx->identity[i] = sys_rand32_get() & 0xFF;
 	}
-	/* Set locally administered bit */
-	ctx->local_addr.long_addr[0] |= 0x02;
+	ctx->identity[0] = (uint8_t)((ctx->identity[0] | 0x02) & 0xFE); /* local, unicast */
+
+	/* The link address is a *view* of that one identity at the PHY's native
+	 * width -- a narrow PHY (DECT NR+ = 16-bit) carries the low 2 bytes; a
+	 * full-width PHY (LoRa) carries all 6. Single source of truth, sliced as
+	 * the wire needs. */
+#if CONFIG_HEYMAC_USE_SHORT_ADDR
+	ctx->local_addr.type = 0;  /* Short (2-byte) link address: low bytes of id */
+	ctx->local_addr.short_addr[0] = ctx->identity[4];
+	ctx->local_addr.short_addr[1] = ctx->identity[5];
+#else
+	ctx->local_addr.type = 1;  /* Long (6-byte) link address == the identity */
+	memcpy(ctx->local_addr.long_addr, ctx->identity, HEYMAC_ADDR_LONG_LEN);
 #endif
 
 	/* Initialize Zephyr synchronization primitives */
@@ -231,6 +239,23 @@ int heymac_get_addr(struct net_if *iface, struct heymac_addr *addr)
 	}
 
 	memcpy(addr, &ctx->local_addr, sizeof(*addr));
+	return 0;
+}
+
+int heymac_get_identity(struct net_if *iface, uint8_t out[6])
+{
+	struct heymac_context *ctx;
+
+	if (!iface || !out) {
+		return -EINVAL;
+	}
+
+	ctx = net_if_l2_data(iface);
+	if (!ctx) {
+		return -EINVAL;
+	}
+
+	memcpy(out, ctx->identity, 6);
 	return 0;
 }
 

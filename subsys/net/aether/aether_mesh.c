@@ -626,10 +626,16 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			ctx->local_addr[0], ctx->local_addr[1],
 			ctx->local_addr[2], ctx->local_addr[3],
 			ctx->local_addr[4], ctx->local_addr[5]);
-		/* Check if packet is for us */
+		/* Check if packet is for us. Broadcast frames carry our durable identity
+		 * (node_eui) as src, not the HONR local_addr, so the own-echo test must
+		 * compare against node_eui -- otherwise two nodes sharing a HONR address
+		 * (e.g. transient co-roots at 0x0000) would drop each other's broadcasts
+		 * as "self". */
 		bool dst_is_bcast =
 			memcmp(hdr.dst, "\xff\xff\xff\xff\xff\xff", 6) == 0;
-		bool src_is_self = memcmp(hdr.src, ctx->local_addr, 6) == 0;
+		bool src_is_self = dst_is_bcast
+			? memcmp(hdr.src, ctx->node_eui, 6) == 0
+			: memcmp(hdr.src, ctx->local_addr, 6) == 0;
 
 		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0 || dst_is_bcast) {
 			/* Our own broadcast echoed back by a relay: ignore (we already
@@ -643,14 +649,23 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			if (!dst_is_bcast) {
 				aether_mesh_send_ack(iface, hdr.src, hdr.seq_no);
 			}
-			/* Broadcast re-flood: party-line / broadcast traffic must traverse
-			 * multiple hops. The mesh layer otherwise only relays unicast (via
-			 * HONR next-hop), so a broadcast was delivered locally and dropped
-			 * -- 1-hop only. Relay it onward with TTL-1 as another broadcast.
-			 * Storm-safe: the recv-top dedup (is_duplicate, recorded on first
-			 * sight) makes each node re-flood a given (src,seq) at most once;
-			 * own echoes are dropped above; TTL bounds the flood. */
-			if (dst_is_bcast && hdr.ttl > 1) {
+			/* Broadcast relay: party-line traffic must traverse multiple hops.
+			 * Tree-aware (HONR) -- only an *interior* node (>=1 child) relays;
+			 * a leaf has nothing downstream, so its retransmit is pure waste.
+			 * This rides the HONR tree's up/down structure instead of a blind
+			 * flood: the originator transmits once, each interior node forwards
+			 * once toward its subtree, and coverage is complete because every
+			 * interior node on the path up to (and back down from) the root
+			 * relays. In a star this collapses from N+1 transmits to 1. Dedup
+			 * (is_duplicate, per (src,seq)) + TTL remain as safety nets for tree
+			 * transients (mid-join / re-parent). Without HONR there is no tree,
+			 * so fall back to the dedup-bounded flood (every node relays once). */
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+			bool relay_bcast = (ctx->honr_child_bitmap != 0);
+#else
+			bool relay_bcast = true;
+#endif
+			if (dst_is_bcast && hdr.ttl > 1 && relay_bcast) {
 				struct net_pkt *fwd = net_pkt_clone(pkt, K_NO_WAIT);
 
 				if (fwd) {

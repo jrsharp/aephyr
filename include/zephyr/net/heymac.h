@@ -119,6 +119,13 @@ struct heymac_context {
 	struct k_work_delayable timeout_work;
 	
 	uint16_t net_id;
+	/* Canonical 6-byte node identity -- the durable address exposed up the
+	 * stack as the Æther address. Minted once at boot (random, locally-
+	 * administered unicast; CGA-ready). On a PHY whose native link addressing
+	 * is narrower than 6 bytes (DECT NR+ = 16-bit), local_addr is a *view* of
+	 * this identity: short_addr = identity[4..5]. The full 6 bytes are the one
+	 * source of truth; the link address is a low-order slice. */
+	uint8_t identity[6];
 	struct heymac_addr local_addr;
 	struct heymac_addr last_rx_src;  /* immediate sender of last RX frame (HONR resender) */
 	int8_t last_rx_rssi;             /* real RSSI (dBm) of last RX frame, from the PHY */
@@ -161,6 +168,19 @@ int heymac_set_addr(struct net_if *iface, const struct heymac_addr *addr);
  * @return 0 on success, negative error code otherwise
  */
 int heymac_get_addr(struct net_if *iface, struct heymac_addr *addr);
+
+/**
+ * @brief Get this node's canonical 6-byte identity (the Æther address).
+ *
+ * Durable for the lifetime of the boot, independent of the (possibly narrower)
+ * link address and of any routing-overlay address. Use this whenever a stable,
+ * full-width reference to this node is needed.
+ *
+ * @param iface Network interface
+ * @param out   6-byte buffer to receive the identity
+ * @return 0 on success, negative error code otherwise
+ */
+int heymac_get_identity(struct net_if *iface, uint8_t out[6]);
 
 /**
  * @brief Set network ID

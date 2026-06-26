@@ -134,12 +134,14 @@ struct aether_mesh_ctx {
 	aether_mesh_recv_cb_t recv_cb;
 	void *recv_cb_user_data;
 
-	/* Neighbor table */
-	struct aether_neighbor neighbors[CONFIG_AETHER_MAX_NEIGHBORS];
+	/* Neighbor + routing tables -- pointers to plain-data arrays allocated
+	 * from PSRAM at init (no kernel objects/stacks inside, so PSRAM-safe),
+	 * keeping them off DRAM and ready to scale.  The locks are kernel
+	 * objects and stay here in the DRAM-heap ctx. */
+	struct aether_neighbor *neighbors;  /* [CONFIG_AETHER_MAX_NEIGHBORS] */
 	struct k_mutex neighbor_lock;
 
-	/* Routing table */
-	struct aether_route routes[CONFIG_AETHER_MAX_ROUTES];
+	struct aether_route *routes;        /* [CONFIG_AETHER_MAX_ROUTES] */
 	struct k_mutex route_lock;
 
 	/* Work queues and threads */

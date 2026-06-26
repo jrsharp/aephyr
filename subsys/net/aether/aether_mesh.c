@@ -17,6 +17,9 @@ LOG_MODULE_REGISTER(aether_mesh, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/net/aether_reliable.h>
 #include <zephyr/random/random.h>
 #include <string.h>
+#if defined(CONFIG_SHARED_MULTI_HEAP)
+#include <zephyr/multi_heap/shared_multi_heap.h>
+#endif
 
 #ifndef CONFIG_NET_L2_HEYMAC
 /* Fallback address/network ID functions for non-HeyMac transports */
@@ -176,6 +179,20 @@ int aether_mesh_build_header(const struct aether_mesh_hdr *hdr,
 }
 
 /* Mesh context management */
+/* Allocate a mesh table: PSRAM when available (plain data -> PSRAM-safe; no
+ * stacks or kernel objects), else the DRAM heap (native_sim / no PSRAM).  Not
+ * freed -- the mesh lives for the session and an init alloc failure is fatal. */
+static void *mesh_table_alloc(size_t sz)
+{
+#if defined(CONFIG_SHARED_MULTI_HEAP)
+	void *p = shared_multi_heap_alloc(SMH_REG_ATTR_EXTERNAL, sz);
+	if (p) {
+		return p;
+	}
+#endif
+	return k_malloc(sz);
+}
+
 int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 {
 	struct aether_mesh_ctx *ctx;
@@ -192,6 +209,22 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 	}
 
 	memset(ctx, 0, sizeof(*ctx));
+
+	/* Neighbour + route tables in PSRAM (plain data; see the struct). */
+	ctx->neighbors = mesh_table_alloc(sizeof(struct aether_neighbor) *
+					  CONFIG_AETHER_MAX_NEIGHBORS);
+	ctx->routes = mesh_table_alloc(sizeof(struct aether_route) *
+				       CONFIG_AETHER_MAX_ROUTES);
+	if (!ctx->neighbors || !ctx->routes) {
+		LOG_ERR("mesh table alloc failed");
+		k_free(ctx);
+		return -ENOMEM;
+	}
+	memset(ctx->neighbors, 0,
+	       sizeof(struct aether_neighbor) * CONFIG_AETHER_MAX_NEIGHBORS);
+	memset(ctx->routes, 0,
+	       sizeof(struct aether_route) * CONFIG_AETHER_MAX_ROUTES);
+
 	ctx->iface = iface;
 	ctx->mesh_net_id = mesh_net_id;
 	ctx->seq_no = sys_rand32_get() & 0xFF;

@@ -172,13 +172,38 @@ static int64_t honr_parent_timeout_ms(void)
 	       HONR_PARENT_MISS_MAX;
 }
 
+/* Set this node's HONR routing address everywhere it must appear coherently:
+ * the 16-bit honr_addr, its mirror in local_addr[4..5], AND the HeyMac link
+ * short-address. The link addr sync is essential, not cosmetic: every frame's
+ * HeyMac src_addr becomes the receiver's last_rx_src, which honr_should_relay()
+ * treats as a HONR address to compute the next hop. If the link addr stayed the
+ * boot-time identity slice (node_eui[4..5]) while the routing address changed
+ * via election/join, relays would derive a garbage next hop from it and drop
+ * every multi-hop unicast frame. The durable identity is unaffected -- it lives
+ * separately in ctx->node_eui. (The DECT PHY RX filter already tracks honr_addr
+ * directly; this fixes the mesh-layer forwarding decision.) */
+static void honr_set_addr(struct aether_mesh_ctx *ctx, uint16_t addr16)
+{
+	ctx->honr_addr = addr16;
+	ctx->local_addr[4] = (uint8_t)(addr16 >> 8);
+	ctx->local_addr[5] = (uint8_t)(addr16 & 0xFF);
+
+#ifdef CONFIG_NET_L2_HEYMAC
+	if (honr_iface) {
+		struct heymac_addr ha = { .type = 0 };  /* short (2-byte) link address */
+
+		ha.short_addr[0] = ctx->local_addr[4];
+		ha.short_addr[1] = ctx->local_addr[5];
+		(void)heymac_set_addr(honr_iface, &ha);
+	}
+#endif
+}
+
 static void honr_become_root(struct aether_mesh_ctx *ctx)
 {
-	ctx->honr_addr = HONR_ROOT;
 	ctx->honr_joined = true;
 	ctx->honr_child_bitmap = 0;
-	ctx->local_addr[4] = 0;
-	ctx->local_addr[5] = 0;
+	honr_set_addr(ctx, HONR_ROOT);
 }
 
 /* Election timer: if no tree was heard during the listen window, claim root. */
@@ -221,10 +246,8 @@ static void honr_relinquish_root(void)
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
 
 	ctx->honr_joined = false;
-	ctx->honr_addr = 0;
 	ctx->honr_child_bitmap = 0;
-	ctx->local_addr[4] = 0;
-	ctx->local_addr[5] = 0;
+	honr_set_addr(ctx, 0);
 	honr_join_pending_until = 0;
 	honr_cand_valid = false;
 	k_work_reschedule(&honr_election_work, K_MSEC(honr_election_delay_ms()));
@@ -600,11 +623,9 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 			LOG_WRN("HONR: rejecting invalid assigned address %04x", assigned);
 			break;
 		}
-		ctx->honr_addr = assigned;
-		ctx->local_addr[4] = payload[6];
-		ctx->local_addr[5] = payload[7];
 		ctx->honr_joined = true;
 		ctx->honr_child_bitmap = 0;
+		honr_set_addr(ctx, assigned);
 		honr_join_pending_until = 0;
 		honr_parent_last_heard = k_uptime_get(); /* start the liveness clock */
 		LOG_INF("HONR joined: address %04x (rank %u)", assigned, honr_rank(assigned));

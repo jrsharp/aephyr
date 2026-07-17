@@ -595,6 +595,87 @@ void aether_mesh_set_neighbor_identity(struct net_if *iface, const uint8_t addr[
 	k_mutex_unlock(&ctx->neighbor_lock);
 }
 
+/* Forward a unicast frame (DATA or ACK) that is not addressed to us, toward
+ * hdr->dst. Stateless HONR next-hop selection: only the node that is actually
+ * the next hop from this frame's immediate sender relays; everyone else who
+ * overheard it drops, so there is no flood. Consumes pkt in every path (queues
+ * it or unrefs it). Shared by the DATA relay and the ACK relay so an
+ * end-to-end ACK routes back across the same multi-hop path the DATA took --
+ * previously ACKs were never forwarded and died one hop from the destination. */
+static void mesh_forward_unicast(struct net_if *iface, struct net_pkt *pkt,
+				 struct aether_mesh_hdr *hdr)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	LOG_DBG("Forwarding %s toward %02x:%02x:%02x:%02x:%02x:%02x",
+		hdr->type == AETHER_MSG_ACK ? "ACK" : "DATA",
+		hdr->dst[0], hdr->dst[1], hdr->dst[2],
+		hdr->dst[3], hdr->dst[4], hdr->dst[5]);
+
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+	struct heymac_context *hm = net_if_l2_data(iface);
+	uint8_t resender[6] = {0};
+
+	if (hm) {
+		resender[4] = hm->last_rx_src.short_addr[0];
+		resender[5] = hm->last_rx_src.short_addr[1];
+	}
+	if (!aether_honr_should_relay(iface, resender, hdr->dst)) {
+		LOG_DBG("HONR: not the next hop, dropping");
+		ctx->packets_dropped++;
+		net_pkt_unref(pkt);
+		return;
+	}
+	if (hdr->ttl <= 1) {
+		LOG_DBG("Packet TTL expired, dropping");
+		ctx->packets_dropped++;
+		net_pkt_unref(pkt);
+		return;
+	}
+	hdr->ttl--;
+	if (pkt->buffer && pkt->buffer->data) {
+		pkt->buffer->data[2] = hdr->ttl;   /* TTL at offset 2 */
+	}
+	{
+		uint8_t nh[6];
+
+		if (aether_honr_next_hop(iface, hdr->dst, nh) == 0) {
+			struct net_linkaddr *ll = net_pkt_lladdr_dst(pkt);
+
+			ll->len = 2;
+			ll->addr[0] = nh[4];
+			ll->addr[1] = nh[5];
+		}
+	}
+	net_if_queue_tx(iface, pkt);
+	ctx->packets_forwarded++;
+	LOG_DBG("HONR forwarded toward %02x:%02x", hdr->dst[4], hdr->dst[5]);
+#else
+	if (hdr->ttl <= 1) {
+		LOG_DBG("Packet TTL expired, dropping");
+		ctx->packets_dropped++;
+		net_pkt_unref(pkt);
+		return;
+	}
+	hdr->ttl--;
+
+	uint8_t next_hop[6];
+
+	if (aether_mesh_find_route(iface, hdr->dst, next_hop) < 0) {
+		LOG_DBG("No route to destination, dropping");
+		ctx->packets_dropped++;
+		net_pkt_unref(pkt);
+		return;
+	}
+	if (pkt->buffer && pkt->buffer->data) {
+		pkt->buffer->data[2] = hdr->ttl;
+	}
+	net_if_queue_tx(iface, pkt);
+	ctx->packets_forwarded++;
+	LOG_DBG("Packet forwarded to next hop");
+#endif
+}
+
 /* Packet reception */
 void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 {
@@ -756,11 +837,14 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		break;
 
 	case AETHER_MSG_ACK:
-		/* Stop-and-wait ARQ: an ACK for a unicast datagram we sent. */
+		/* Stop-and-wait ARQ. If it's for us, wake the waiting sender;
+		 * otherwise relay it toward the original sender (multi-hop ACK). */
 		if (memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
 			aether_mesh_ack_received(hdr.src, hdr.seq_no);
+			net_pkt_unref(pkt);
+		} else {
+			mesh_forward_unicast(iface, pkt, &hdr);
 		}
-		net_pkt_unref(pkt);
 		break;
 
 	case AETHER_MSG_DATA:
@@ -848,83 +932,8 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			}
 			net_pkt_unref(pkt);
 		} else {
-			/* Forward packet */
-			LOG_DBG("Forwarding packet to %02x:%02x:%02x:%02x:%02x:%02x",
-				hdr.dst[0], hdr.dst[1], hdr.dst[2],
-				hdr.dst[3], hdr.dst[4], hdr.dst[5]);
-
-#if defined(CONFIG_AETHER_ROUTING_HONR)
-			/* Stateless HONR forward: relay only if we are the next hop
-			 * for this frame from its immediate sender (resender). Other
-			 * overhearing nodes drop it, so there is no flood. */
-			struct heymac_context *hm = net_if_l2_data(iface);
-			uint8_t resender[6] = {0};
-
-			if (hm) {
-				resender[4] = hm->last_rx_src.short_addr[0];
-				resender[5] = hm->last_rx_src.short_addr[1];
-			}
-			if (!aether_honr_should_relay(iface, resender, hdr.dst)) {
-				LOG_DBG("HONR: not the next hop, dropping");
-				ctx->packets_dropped++;
-				net_pkt_unref(pkt);
-				break;
-			}
-			if (hdr.ttl <= 1) {
-				LOG_DBG("Packet TTL expired, dropping");
-				ctx->packets_dropped++;
-				net_pkt_unref(pkt);
-				break;
-			}
-			hdr.ttl--;
-			if (pkt->buffer && pkt->buffer->data) {
-				pkt->buffer->data[2] = hdr.ttl;
-			}
-			/* Address the next hop so the radio hardware-filters it. */
-			{
-				uint8_t nh[6];
-
-				if (aether_honr_next_hop(iface, hdr.dst, nh) == 0) {
-					struct net_linkaddr *ll = net_pkt_lladdr_dst(pkt);
-
-					ll->len = 2;
-					ll->addr[0] = nh[4];
-					ll->addr[1] = nh[5];
-				}
-			}
-			net_if_queue_tx(iface, pkt);
-			ctx->packets_forwarded++;
-			LOG_DBG("HONR forwarded toward %02x:%02x", hdr.dst[4], hdr.dst[5]);
-#else
-			/* Decrement TTL and check if packet should be dropped */
-			if (hdr.ttl <= 1) {
-				LOG_DBG("Packet TTL expired, dropping");
-				ctx->packets_dropped++;
-				net_pkt_unref(pkt);
-				break;
-			}
-			hdr.ttl--;
-
-			/* Find route to destination */
-			uint8_t next_hop[6];
-			int ret = aether_mesh_find_route(iface, hdr.dst, next_hop);
-			if (ret < 0) {
-				LOG_DBG("No route to destination, dropping");
-				ctx->packets_dropped++;
-				net_pkt_unref(pkt);
-				break;
-			}
-
-			/* Update mesh header with decremented TTL */
-			if (pkt->buffer && pkt->buffer->data) {
-				pkt->buffer->data[2] = hdr.ttl;  /* TTL is at offset 2 in mesh header */
-			}
-
-			/* Forward packet via L2 layer */
-			net_if_queue_tx(iface, pkt);
-			ctx->packets_forwarded++;
-			LOG_DBG("Packet forwarded to next hop");
-#endif
+			/* Not for us -- relay toward hdr.dst (shared with ACK relay). */
+			mesh_forward_unicast(iface, pkt, &hdr);
 		}
 		break;
 

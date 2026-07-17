@@ -28,31 +28,89 @@ static inline uint16_t aether_route_get_network_id_fallback(struct net_if *iface
 /* External reference to global mesh context */
 extern struct aether_mesh_ctx *g_mesh_ctx;
 
-/* Static buffers for reliable send - moved to file scope for PSRAM placement.
- * Sends are serialized so a single buffer is safe.
- * Frame = HeyMac hdr (~7) + Mesh hdr (~20) + payload (up to MAX_PAYLOAD). */
-#ifdef CONFIG_ESP_SPIRAM
-static uint8_t frame_buf[CONFIG_AETHER_MAX_PAYLOAD + 32]
-	__attribute__((section(".ext_ram.bss")));
-#else
-static uint8_t frame_buf[CONFIG_AETHER_MAX_PAYLOAD + 32];
-#endif
+/* All mesh TX now goes through mesh_tx_frame() on the net_pkt pipeline (no more
+ * hand-built raw HeyMac frames in a file-scope buffer, and no aether_lora_send_
+ * sync() direct path) -- that unification is what lets reliable DATA and ACKs
+ * route across multiple hops. The old frame_buf/ack_buf statics are gone. */
 
 /* --- Stop-and-wait ACK for unicast datagram reliability ------------------
  * The PHY is best-effort (no link ack), so a lost frame is just lost. Here we
  * add a minimal stop-and-wait ARQ: the sender waits for the receiver's ACK and
  * retransmits on timeout (only on actual loss -- no blind redundancy, so no
- * channel congestion when the first copy lands). Sends are serialized (the 9P
- * server drives them on one thread), so a single pending-ack slot is enough;
- * the ACK arrives on the RX thread and gives the semaphore. */
+ * channel congestion when the first copy lands). The ACK is an end-to-end
+ * signal from the final destination back to the source, routed hop-by-hop the
+ * same way the DATA is (see mesh_tx_frame() + the relay's ACK-forward path).
+ *
+ * A POOL of waiters (not a single slot) so multiple reliable transactions can
+ * be outstanding at once -- e.g. concurrent /net/aether conversations each
+ * carrying a 9P session, or a node relaying one flow while originating another.
+ * A waiter is matched to its ACK by (dst, seq); the per-node monotonic seq
+ * counter keeps that pair unique across conversations to the same peer within
+ * the dedup window. */
 #define AETHER_ACK_TIMEOUT_MS 250          /* per-attempt wait for the ACK */
-static K_SEM_DEFINE(ack_sem, 0, 1);
-static struct {
+
+struct arq_waiter {
+	struct k_sem sem;
 	uint8_t dst[6];      /* peer we are awaiting an ACK from */
 	uint8_t seq;         /* seq_no of the DATA we sent */
-	volatile bool waiting;
-} ack_wait;
-static uint8_t ack_buf[40];                /* separate from frame_buf: ACK TX from RX ctx */
+	bool in_use;
+};
+static struct arq_waiter arq_waiters[CONFIG_AETHER_MAX_ARQ_WAITERS];
+static K_MUTEX_DEFINE(arq_mutex);          /* guards the pool + the seq counter */
+static bool arq_ready;
+
+/* k_sem in a static array needs runtime init; do it once, lazily, under the
+ * mutex (avoids adding a new boot hook in this file). */
+static void arq_init_once(void)
+{
+	k_mutex_lock(&arq_mutex, K_FOREVER);
+	if (!arq_ready) {
+		for (int i = 0; i < ARRAY_SIZE(arq_waiters); i++) {
+			k_sem_init(&arq_waiters[i].sem, 0, 1);
+		}
+		arq_ready = true;
+	}
+	k_mutex_unlock(&arq_mutex);
+}
+
+/* Allocate the next monotonic per-node sequence number. Guarded because
+ * reliable sends can now run from more than one thread (multiple conversations
+ * / work queues), unlike the old single-serialized-sender assumption. */
+static uint8_t alloc_seq(struct aether_mesh_ctx *ctx)
+{
+	uint8_t s;
+
+	k_mutex_lock(&arq_mutex, K_FOREVER);
+	s = ctx->seq_no++;
+	k_mutex_unlock(&arq_mutex);
+	return s;
+}
+
+static struct arq_waiter *arq_alloc(const uint8_t dst[6], uint8_t seq)
+{
+	struct arq_waiter *w = NULL;
+
+	k_mutex_lock(&arq_mutex, K_FOREVER);
+	for (int i = 0; i < ARRAY_SIZE(arq_waiters); i++) {
+		if (!arq_waiters[i].in_use) {
+			w = &arq_waiters[i];
+			w->in_use = true;
+			memcpy(w->dst, dst, 6);
+			w->seq = seq;
+			k_sem_reset(&w->sem);
+			break;
+		}
+	}
+	k_mutex_unlock(&arq_mutex);
+	return w;
+}
+
+static void arq_free(struct arq_waiter *w)
+{
+	k_mutex_lock(&arq_mutex, K_FOREVER);
+	w->in_use = false;
+	k_mutex_unlock(&arq_mutex);
+}
 
 /* Route discovery and management functions */
 
@@ -286,56 +344,39 @@ static int aether_mesh_send_rreq(struct net_if *iface, const uint8_t dest[6])
 }
 #endif /* !CONFIG_AETHER_ROUTING_HONR */
 
-/* Mesh data transmission */
-int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
-                     const uint8_t *data, size_t len, uint8_t priority)
+/* Shared mesh TX core: build a mesh frame (header + optional payload) into a
+ * net_pkt, address the link-layer next hop (HONR), and queue it. The single
+ * place any mesh frame -- best-effort DATA, reliable DATA, or an ACK -- goes
+ * onto the wire, so all three route across multiple hops identically. Unifying
+ * this is what fixes the long-standing split where the reliable/ACK paths hand-
+ * built raw single-hop frames and never set a next hop.
+ *
+ * `src` is the caller's choice: node_eui for broadcast (stable identity), the
+ * HONR local_addr for unicast DATA + ACKs (doubles as the routing/reply addr).
+ * `seq` is pre-allocated by the caller (so a reliable sender can match the ACK).
+ * Broadcast (dst == ff:ff:ff:ff:ff:ff) is left link-unaddressed so the driver
+ * sends a type-1 broadcast; the mesh reflood in the RX path carries it onward. */
+static int mesh_tx_frame(struct net_if *iface, uint8_t type,
+			 const uint8_t src[6], const uint8_t dst[6],
+			 uint8_t seq, uint8_t priority,
+			 const uint8_t *data, size_t len)
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
 	struct aether_mesh_hdr hdr;
 	struct net_pkt *pkt;
 	uint8_t hdr_buf[32];
-	uint8_t next_hop[6];
-	int hdr_len;
-	int ret;
-
-	if (!ctx || ctx->iface != iface || !dst || !data ||
-	    len > CONFIG_AETHER_MAX_PAYLOAD) {
-		return -EINVAL;
-	}
-
-	/* Check if destination is broadcast */
+	int hdr_len, ret;
 	static const uint8_t broadcast_addr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 	bool is_broadcast = (memcmp(dst, broadcast_addr, 6) == 0);
 
-	if (!is_broadcast) {
-#if defined(CONFIG_AETHER_ROUTING_HONR)
-		/* HONR forwarding is stateless and receivers self-select the next
-		 * hop, so no route lookup or route discovery is needed here. */
-		ARG_UNUSED(next_hop);
-#else
-		/* Unicast - find route to destination */
-		ret = aether_mesh_find_route(iface, dst, next_hop);
-		if (ret < 0) {
-			/* No route found - initiate route discovery */
-			LOG_DBG("No route to destination, sending RREQ");
-			return aether_mesh_send_rreq(iface, dst);
-		}
-#endif
-	}
-
-	/* Build mesh header. Broadcast (party-line) frames carry the durable node
-	 * identity as src so receivers learn a *stable* sender -- the HONR routing
-	 * address churns and the root's is always 0x0000, which breaks chat keying,
-	 * dedup, and the own-echo guard. Unicast keeps the HONR src (it doubles as
-	 * the routing/reply address until the unicast path is likewise decoupled). */
 	memset(&hdr, 0, sizeof(hdr));
-	hdr.type = AETHER_MSG_DATA;
+	hdr.type = type;
 	hdr.ttl = CONFIG_AETHER_DEFAULT_TTL;
-	memcpy(hdr.src, is_broadcast ? ctx->node_eui : ctx->local_addr, 6);
+	memcpy(hdr.src, src, 6);
 	memcpy(hdr.dst, dst, 6);
-	hdr.seq_no = ctx->seq_no++;
+	hdr.seq_no = seq;
 	hdr.qos_security = (priority << 6) | (AETHER_DELIV_BESTEFFORT << 5);
-	hdr.length = len;
+	hdr.length = (uint16_t)len;
 
 	/* Optimize network ID */
 #ifdef CONFIG_NET_L2_HEYMAC
@@ -348,38 +389,32 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 		hdr.mesh_net_id = ctx->mesh_net_id;
 	}
 
-	/* Build header */
 	hdr_len = aether_mesh_build_header(&hdr, hdr_buf, sizeof(hdr_buf));
 	if (hdr_len < 0) {
 		LOG_ERR("Failed to build mesh header: %d", hdr_len);
 		return hdr_len;
 	}
 
-	/* Allocate packet */
 	pkt = net_pkt_alloc_with_buffer(iface, hdr_len + len, AF_UNSPEC, 0, K_NO_WAIT);
 	if (!pkt) {
 		LOG_ERR("Failed to allocate mesh packet");
 		return -ENOMEM;
 	}
 
-	/* Write header and payload */
 	ret = net_pkt_write(pkt, hdr_buf, hdr_len);
-	if (ret < 0) {
-		LOG_ERR("Failed to write mesh header: %d", ret);
-		net_pkt_unref(pkt);
-		return ret;
+	if (ret == 0 && len > 0) {
+		ret = net_pkt_write(pkt, data, len);
 	}
-
-	ret = net_pkt_write(pkt, data, len);
 	if (ret < 0) {
-		LOG_ERR("Failed to write mesh payload: %d", ret);
+		LOG_ERR("Failed to write mesh frame: %d", ret);
 		net_pkt_unref(pkt);
 		return ret;
 	}
 
 #if defined(CONFIG_AETHER_ROUTING_HONR)
 	/* Tag the link-layer destination with the HONR next hop so the radio
-	 * addresses (and the modem hardware-filters) the frame. */
+	 * addresses (and the modem hardware-filters) the frame. Applies to any
+	 * unicast frame -- DATA or ACK -- so both route across multiple hops. */
 	if (!is_broadcast) {
 		uint8_t nh[6];
 
@@ -393,24 +428,60 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 	}
 #endif
 
-	/* Send packet */
-	net_if_queue_tx(iface, pkt);
-	/* net_if_queue_tx takes ownership of the packet */
-
-	LOG_DBG("Mesh data sent to %02x:%02x:%02x:%02x:%02x:%02x, len=%zu",
-		dst[0], dst[1], dst[2], dst[3], dst[4], dst[5], len);
+	net_if_queue_tx(iface, pkt);   /* takes ownership of the packet */
 	return 0;
 }
 
-/* Reliable mesh send with synchronous TX and retries */
+/* Mesh data transmission (best-effort, one shot). */
+int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
+                     const uint8_t *data, size_t len, uint8_t priority)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	if (!ctx || ctx->iface != iface || !dst || !data ||
+	    len > CONFIG_AETHER_MAX_PAYLOAD) {
+		return -EINVAL;
+	}
+
+	static const uint8_t broadcast_addr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+	bool is_broadcast = (memcmp(dst, broadcast_addr, 6) == 0);
+
+#if !defined(CONFIG_AETHER_ROUTING_HONR)
+	if (!is_broadcast) {
+		/* Non-HONR: need a route (or discovery) before we can send. */
+		uint8_t next_hop[6];
+
+		if (aether_mesh_find_route(iface, dst, next_hop) < 0) {
+			LOG_DBG("No route to destination, sending RREQ");
+			return aether_mesh_send_rreq(iface, dst);
+		}
+	}
+#endif
+
+	/* Broadcast (party-line) frames carry the durable node identity as src so
+	 * receivers learn a *stable* sender -- the HONR routing address churns and
+	 * the root's is always 0x0000, which breaks chat keying, dedup, and the
+	 * own-echo guard. Unicast keeps the HONR src (routing/reply address). */
+	const uint8_t *src = is_broadcast ? ctx->node_eui : ctx->local_addr;
+	int ret = mesh_tx_frame(iface, AETHER_MSG_DATA, src, dst,
+				alloc_seq(ctx), priority, data, len);
+
+	if (ret == 0) {
+		LOG_DBG("Mesh data sent to %02x:%02x:%02x:%02x:%02x:%02x, len=%zu",
+			dst[0], dst[1], dst[2], dst[3], dst[4], dst[5], len);
+	}
+	return ret;
+}
+
+/* Reliable mesh send: stop-and-wait ARQ over the routed (multi-hop) TX core.
+ * Unicast waits for the destination's end-to-end ACK and retransmits on
+ * timeout; broadcast has no single acker so it is best-effort one-shot (the
+ * caller layers its own delivery check, e.g. the chat transcript verify). */
 int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 			      const uint8_t *data, size_t len, int max_retries)
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
-	struct aether_mesh_hdr mesh_hdr;
-	static uint8_t mesh_hdr_buf[32];
-	int mesh_hdr_len;
-	int frame_len;
+	uint8_t seq;
 	int ret;
 
 	if (!ctx || ctx->iface != iface || !dst || !data ||
@@ -418,153 +489,88 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 		return -EINVAL;
 	}
 
-	/* Check if destination is broadcast */
 	static const uint8_t broadcast_addr[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
 	bool is_broadcast = (memcmp(dst, broadcast_addr, 6) == 0);
 
-	if (!is_broadcast) {
-		/* For unicast, would need route lookup - for now just direct */
-		LOG_DBG("Reliable unicast not fully implemented, sending direct");
-	}
-
-	/* Build mesh header. Same src rule as aether_mesh_send(): broadcast frames
-	 * carry the durable node_eui (the HONR address churns and the root's is
-	 * always 0x0000, which breaks chat keying/dedup/own-echo); unicast keeps
-	 * the HONR src since it doubles as the routing/reply address. */
-	memset(&mesh_hdr, 0, sizeof(mesh_hdr));
-	mesh_hdr.type = AETHER_MSG_DATA;
-	mesh_hdr.ttl = CONFIG_AETHER_DEFAULT_TTL;
-	memcpy(mesh_hdr.src, is_broadcast ? ctx->node_eui : ctx->local_addr, 6);
-	memcpy(mesh_hdr.dst, dst, 6);
-	mesh_hdr.seq_no = ctx->seq_no++;
-	mesh_hdr.qos_security = (AETHER_PRIORITY_NORMAL << 6) | (AETHER_DELIV_BESTEFFORT << 5);
-	mesh_hdr.length = len;
-
-	/* Optimize network ID */
-	uint16_t heymac_net_id = heymac_get_network_id(iface);
-	if (CONFIG_AETHER_CONDITIONAL_NET_ID && ctx->mesh_net_id != heymac_net_id) {
-		mesh_hdr.flags |= AETHER_FCTL_MESH_NET_ID;
-		mesh_hdr.mesh_net_id = ctx->mesh_net_id;
-	}
-
-	/* Build mesh header into buffer */
-	mesh_hdr_len = aether_mesh_build_header(&mesh_hdr, mesh_hdr_buf, sizeof(mesh_hdr_buf));
-	if (mesh_hdr_len < 0) {
-		LOG_ERR("Failed to build mesh header: %d", mesh_hdr_len);
-		return mesh_hdr_len;
-	}
-
-	/* Build simple HeyMac header (minimal for direct TX) */
-	struct heymac_context *heymac_ctx = net_if_l2_data(iface);
-	if (!heymac_ctx) {
-		return -EINVAL;
-	}
-
-	/* Frame format: [HeyMac header][Mesh header][Payload] */
-	frame_len = 0;
-
-	/* HeyMac header - simplified version for direct TX */
-	frame_buf[frame_len++] = HEYMAC_FRM_TYPE_DATA;  /* Version/Type */
-	frame_buf[frame_len++] = HEYMAC_FCTL_S | HEYMAC_FCTL_M | HEYMAC_FCTL_N;  /* Frame control */
-	frame_buf[frame_len++] = (heymac_ctx->net_id >> 8) & 0xFF;  /* Net ID high */
-	frame_buf[frame_len++] = heymac_ctx->net_id & 0xFF;  /* Net ID low */
-	/* Source address (short) */
-	frame_buf[frame_len++] = heymac_ctx->local_addr.short_addr[0];
-	frame_buf[frame_len++] = heymac_ctx->local_addr.short_addr[1];
-	frame_buf[frame_len++] = heymac_ctx->tx_seq_no++;  /* Sequence */
-
-	/* Append mesh header */
-	if (frame_len + mesh_hdr_len + len > sizeof(frame_buf)) {
-		LOG_ERR("Frame too large: %d", frame_len + mesh_hdr_len + (int)len);
-		return -ENOMEM;
-	}
-	memcpy(&frame_buf[frame_len], mesh_hdr_buf, mesh_hdr_len);
-	frame_len += mesh_hdr_len;
-
-	/* Append payload */
-	memcpy(&frame_buf[frame_len], data, len);
-	frame_len += len;
+	seq = alloc_seq(ctx);
 
 	if (is_broadcast) {
-		/* No single acker for a broadcast -- best-effort, one shot. */
-		return aether_lora_send_sync(frame_buf, frame_len, max_retries);
+		/* No single acker -- best-effort, one shot. node_eui src (stable). */
+		return mesh_tx_frame(iface, AETHER_MSG_DATA, ctx->node_eui, dst,
+				     seq, AETHER_PRIORITY_NORMAL, data, len);
 	}
 
-	/* Unicast: stop-and-wait ARQ. Arm the pending-ack BEFORE the first TX, then
-	 * (re)transmit and wait for the receiver's ACK; the RX path gives ack_sem.
-	 * Retransmits only on a missed ACK (no congestion when the first arrives);
-	 * the receiver dedups a retransmitted DATA by (src, seq_no). */
-	k_sem_reset(&ack_sem);
-	memcpy(ack_wait.dst, dst, 6);
-	ack_wait.seq = mesh_hdr.seq_no;
-	ack_wait.waiting = true;
+	/* Unicast: stop-and-wait ARQ. Claim a waiter (matched to the ACK by
+	 * (dst,seq)) BEFORE the first TX, then (re)transmit and wait for the
+	 * receiver's end-to-end ACK; the RX path gives the waiter's sem.
+	 * Retransmits only on a missed ACK (no congestion when the first
+	 * arrives); the receiver dedups a retransmitted DATA by (src, seq_no).
+	 * The HONR src doubles as the routing/reply address. */
+	arq_init_once();
+
+	struct arq_waiter *w = arq_alloc(dst, seq);
+
+	if (!w) {
+		LOG_WRN("ARQ waiter pool exhausted (%d in flight); send to %02x:%02x dropped",
+			CONFIG_AETHER_MAX_ARQ_WAITERS, dst[4], dst[5]);
+		return -EBUSY;
+	}
 
 	ret = -ETIMEDOUT;
 	for (int attempt = 0; attempt <= max_retries; attempt++) {
-		(void)aether_lora_send_sync(frame_buf, frame_len, 2);
-		if (k_sem_take(&ack_sem, K_MSEC(AETHER_ACK_TIMEOUT_MS)) == 0) {
+		int txr = mesh_tx_frame(iface, AETHER_MSG_DATA, ctx->local_addr, dst,
+					seq, AETHER_PRIORITY_NORMAL, data, len);
+
+		if (txr < 0) {
+			ret = txr;
+			break;
+		}
+		if (k_sem_take(&w->sem, K_MSEC(AETHER_ACK_TIMEOUT_MS)) == 0) {
 			ret = 0;
 			break;
 		}
 	}
-	ack_wait.waiting = false;
+	arq_free(w);
 
 	if (ret == 0) {
 		LOG_DBG("datagram ACKed by %02x:%02x seq=%u len=%zu",
-			dst[4], dst[5], mesh_hdr.seq_no, len);
+			dst[4], dst[5], seq, len);
 	} else {
-		LOG_WRN("datagram to %02x:%02x seq=%u: NO ACK after %d tries",
-			dst[4], dst[5], mesh_hdr.seq_no, max_retries + 1);
+		LOG_WRN("datagram to %02x:%02x seq=%u: no ACK/failed (%d) after %d tries",
+			dst[4], dst[5], seq, ret, max_retries + 1);
 	}
 
 	return ret;
 }
 
 /* Build + transmit a bare ACK frame back to `to`, echoing the acked `seq`.
- * Called from the RX path; uses ack_buf (never frame_buf) so it can run
- * concurrently with a send_reliable in its ACK wait. Best-effort: if the ACK
- * is lost the sender retransmits the DATA and we re-ACK from the dup path. */
+ * Routed through the shared TX core so the ACK is next-hop-addressed and
+ * relays back across multiple hops (the relay's ACK-forward path carries it).
+ * The ACK's src is our HONR local_addr (the reply/routing address the original
+ * sender awaits by (dst,seq)). Best-effort: if the ACK is lost the sender
+ * retransmits the DATA and we re-ACK from the dup path. */
 void aether_mesh_send_ack(struct net_if *iface, const uint8_t to[6], uint8_t seq)
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
-	struct heymac_context *hm = iface ? net_if_l2_data(iface) : NULL;
-	struct aether_mesh_hdr h;
-	uint8_t mh[32];
-	int mhl, fl = 0;
 
-	if (!ctx || !hm) {
+	if (!ctx || ctx->iface != iface) {
 		return;
 	}
-	memset(&h, 0, sizeof(h));
-	h.type = AETHER_MSG_ACK;
-	h.ttl = CONFIG_AETHER_DEFAULT_TTL;
-	memcpy(h.src, ctx->local_addr, 6);
-	memcpy(h.dst, to, 6);
-	h.seq_no = seq;                 /* echo the DATA's seq so the sender matches */
-	h.qos_security = (AETHER_PRIORITY_NORMAL << 6) | (AETHER_DELIV_BESTEFFORT << 5);
-	h.length = 0;
-	mhl = aether_mesh_build_header(&h, mh, sizeof(mh));
-	if (mhl < 0) {
-		return;
-	}
-	ack_buf[fl++] = HEYMAC_FRM_TYPE_DATA;
-	ack_buf[fl++] = HEYMAC_FCTL_S | HEYMAC_FCTL_M | HEYMAC_FCTL_N;
-	ack_buf[fl++] = (hm->net_id >> 8) & 0xFF;
-	ack_buf[fl++] = hm->net_id & 0xFF;
-	ack_buf[fl++] = hm->local_addr.short_addr[0];
-	ack_buf[fl++] = hm->local_addr.short_addr[1];
-	ack_buf[fl++] = hm->tx_seq_no++;
-	memcpy(&ack_buf[fl], mh, mhl);
-	fl += mhl;
-	(void)aether_lora_send_sync(ack_buf, fl, 1);
+	(void)mesh_tx_frame(iface, AETHER_MSG_ACK, ctx->local_addr, to,
+			    seq, AETHER_PRIORITY_NORMAL, NULL, 0);
 }
 
-/* Called from the RX path when an ACK arrives: wake send_reliable if it matches
- * the conversation we're awaiting an ACK for. */
+/* Called from the RX path when an ACK arrives: wake whichever reliable send is
+ * awaiting this (from, seq) -- scans the waiter pool so concurrent flows each
+ * get their own ACK. Giving an already-taken/freed waiter's sem is harmless. */
 void aether_mesh_ack_received(const uint8_t from[6], uint8_t seq)
 {
-	if (ack_wait.waiting && ack_wait.seq == seq &&
-	    memcmp(ack_wait.dst, from, 6) == 0) {
-		k_sem_give(&ack_sem);
+	k_mutex_lock(&arq_mutex, K_FOREVER);
+	for (int i = 0; i < ARRAY_SIZE(arq_waiters); i++) {
+		if (arq_waiters[i].in_use && arq_waiters[i].seq == seq &&
+		    memcmp(arq_waiters[i].dst, from, 6) == 0) {
+			k_sem_give(&arq_waiters[i].sem);
+		}
 	}
+	k_mutex_unlock(&arq_mutex);
 }

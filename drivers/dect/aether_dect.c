@@ -186,12 +186,21 @@ static void aether_dect_radio_thread(void *p1, void *p2, void *p3)
 	while (ctx->running) {
 #if defined(CONFIG_AETHER_ROUTING_HONR)
 		/* Track the HONR identity so receive hardware-filters to it once
-		 * joined (0 while unjoined keeps RX promiscuous for the tree join).
+		 * joined (0 while unjoined keeps RX broadcast-only for the tree join).
+		 * The root's HONR address is 0x0000, but a filter of 0 receives ONLY
+		 * broadcasts (the modem won't deliver addressed frames to id 0), so map
+		 * the root to the reserved DECT_PHY_ROOT_ID -- otherwise nothing can
+		 * unicast to the root, and every cross-subtree path routes through it.
 		 * Takes effect on the next receive re-arm.
 		 */
 		if (g_mesh_ctx) {
-			dect_phy_set_node_id(g_mesh_ctx->honr_joined ?
-					     g_mesh_ctx->honr_addr : 0);
+			uint16_t rx_filter_id = 0;
+
+			if (g_mesh_ctx->honr_joined) {
+				rx_filter_id = (g_mesh_ctx->honr_addr == 0) ?
+					DECT_PHY_ROOT_ID : g_mesh_ctx->honr_addr;
+			}
+			dect_phy_set_node_id(rx_filter_id);
 		}
 #endif
 
@@ -244,6 +253,12 @@ static void aether_dect_radio_thread(void *p1, void *p2, void *p3)
 
 		if (ll->len >= 2) {
 			rx_id = (uint16_t)((ll->addr[0] << 8) | ll->addr[1]);
+			/* HONR next-hop 0x0000 is the root; the root filters on the
+			 * reserved DECT_PHY_ROOT_ID (a 0 filter is broadcast-only), so
+			 * address the frame there instead. Mirror of the RX mapping. */
+			if (rx_id == 0) {
+				rx_id = DECT_PHY_ROOT_ID;
+			}
 		}
 
 		ret = aether_dect_radio_tx(ctx, tx_frame_buf, len, rx_id,

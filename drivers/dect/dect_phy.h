@@ -47,6 +47,16 @@ int dect_phy_init(uint16_t *device_id);
 /** DECT NR+ PHY broadcast receiver identity (accepted by every RX filter). */
 #define DECT_PHY_BROADCAST_ID 0xFFFFU
 
+/** PHY receiver identity the HONR root (address 0x0000) filters/receives on.
+ * The modem treats receiver_identity == 0 as "broadcast-only" (it does NOT
+ * deliver addressed Type-2 frames to a node filtering on 0), so the root -- and
+ * addressed unicast toward it -- must use a reserved non-zero id instead. 0xFFFE
+ * is not the broadcast id (0xFFFF), not the 0 sentinel, and not a valid HONR node
+ * address (nibbles 0xF are invalid; HONR_CHILD_MAX is 0xE), so it can never
+ * collide with a real node's routing address. The driver maps HONR 0x0000 <->
+ * this id at the PHY boundary only; mesh/HeyMac addresses stay 0x0000. */
+#define DECT_PHY_ROOT_ID 0xFFFEU
+
 /** @brief Register the receive callback (NULL to disable). */
 void dect_phy_set_rx_cb(dect_phy_rx_cb_t cb);
 

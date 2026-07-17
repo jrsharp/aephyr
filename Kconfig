@@ -130,6 +130,19 @@ config AETHER_MAX_DENYLIST
 	  be rejected at admission even though it's in radio range -- for forcing
 	  a multi-hop topology on the bench without physical separation.
 
+config AETHER_MAX_ARQ_WAITERS
+	int "Maximum concurrent reliable-datagram (ARQ) waiters"
+	default 4
+	range 1 16
+	help
+	  Number of stop-and-wait ARQ transactions that can be outstanding at
+	  once on one node. Each in-flight aether_mesh_send_reliable() call
+	  (e.g. one per active /net/aether conversation carrying a 9P session)
+	  holds one waiter until its ACK arrives or it times out. Sized to the
+	  number of conversations you expect to originate reliable traffic
+	  concurrently; excess concurrent sends get -EBUSY. Was effectively 1
+	  (a single global slot) before multi-hop reliable delivery.
+
 config AETHER_CONDITIONAL_NET_ID
 	bool "Use conditional mesh network ID optimization"
 	default y

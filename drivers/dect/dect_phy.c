@@ -214,6 +214,7 @@ static void on_pcc(const struct nrf_modem_dect_phy_pcc_event *evt)
 	stats.rx_pcc++;
 	last_pcc_tx_id = (uint16_t)(evt->hdr.hdr_type_1.transmitter_id_hi << 8 |
 				    evt->hdr.hdr_type_1.transmitter_id_lo);
+
 }
 
 static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
@@ -309,8 +310,17 @@ static void dect_phy_event_handler(const struct nrf_modem_dect_phy_event *evt)
 	case NRF_MODEM_DECT_PHY_EVT_PCC:
 		on_pcc(&evt->pcc);
 		break;
+	case NRF_MODEM_DECT_PHY_EVT_PCC_ERROR:
+		/* A PCC arrived but failed CRC. Kept as a debug-visible signal --
+		 * these events were silently ignored before, which cost a full day
+		 * of blind PHY debugging (see the Type-2 format-000 saga). */
+		LOG_DBG("PCC CRC failure (rssi2=%d)", evt->pcc_crc_err.rssi_2 / 2);
+		break;
 	case NRF_MODEM_DECT_PHY_EVT_PDC:
 		on_pdc(&evt->pdc);
+		break;
+	case NRF_MODEM_DECT_PHY_EVT_PDC_ERROR:
+		LOG_DBG("PDC CRC failure (rssi2=%d)", evt->pdc_crc_err.rssi_2 / 2);
 		break;
 	case NRF_MODEM_DECT_PHY_EVT_RSSI:
 		on_rssi(&evt->rssi);
@@ -434,10 +444,16 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 	uint8_t pkt_len = dect_phy_packet_length_for(len, CONFIG_AETHER_DECT_MCS);
 
 	if (addressed) {
-		/* Addressed Type 2 header: lets receivers filter in hardware. */
+		/* Addressed Type 2 header: lets receivers filter in hardware.
+		 * Header format 001 = "no HARQ feedback requested" (DECT-2020 Part 4
+		 * Table 6.2.1-2a) -- reliability is the mesh layer's stop-and-wait
+		 * ARQ, not PHY HARQ. Format 000 requests HARQ feedback the receiver
+		 * must schedule, and format-000 frames were never delivered to our
+		 * receivers in practice (PCC never surfaced, no CRC error); Nordic's
+		 * dect_shell uses format 001 for its own non-HARQ addressed frames. */
 		phdr.hdr_type_2.packet_length = pkt_len;
 		phdr.hdr_type_2.packet_length_type = 0;
-		phdr.hdr_type_2.header_format = 0;
+		phdr.hdr_type_2.header_format = 1;
 		phdr.hdr_type_2.short_network_id = (CONFIG_AETHER_DECT_NETWORK_ID & 0xff);
 		phdr.hdr_type_2.transmitter_id_hi = (tx_id() >> 8);
 		phdr.hdr_type_2.transmitter_id_lo = (tx_id() & 0xff);
@@ -445,7 +461,8 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 		phdr.hdr_type_2.transmit_power = cfg_tx_power;
 		phdr.hdr_type_2.receiver_id_hi = (receiver_id >> 8);
 		phdr.hdr_type_2.receiver_id_lo = (receiver_id & 0xff);
-		phdr.hdr_type_2.df_new_data_indication = 1;
+		/* Format 001: HARQ fields (process/NDI/RV) are reserved bits --
+		 * leave them zeroed (memset above). */
 	} else {
 		/* Broadcast Type 1 header (no receiver identity). */
 		struct phy_ctrl_field_common *h1 = (struct phy_ctrl_field_common *)&phdr;

@@ -427,11 +427,14 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 		LOG_DBG("Reliable unicast not fully implemented, sending direct");
 	}
 
-	/* Build mesh header */
+	/* Build mesh header. Same src rule as aether_mesh_send(): broadcast frames
+	 * carry the durable node_eui (the HONR address churns and the root's is
+	 * always 0x0000, which breaks chat keying/dedup/own-echo); unicast keeps
+	 * the HONR src since it doubles as the routing/reply address. */
 	memset(&mesh_hdr, 0, sizeof(mesh_hdr));
 	mesh_hdr.type = AETHER_MSG_DATA;
 	mesh_hdr.ttl = CONFIG_AETHER_DEFAULT_TTL;
-	memcpy(mesh_hdr.src, ctx->local_addr, 6);
+	memcpy(mesh_hdr.src, is_broadcast ? ctx->node_eui : ctx->local_addr, 6);
 	memcpy(mesh_hdr.dst, dst, 6);
 	mesh_hdr.seq_no = ctx->seq_no++;
 	mesh_hdr.qos_security = (AETHER_PRIORITY_NORMAL << 6) | (AETHER_DELIV_BESTEFFORT << 5);

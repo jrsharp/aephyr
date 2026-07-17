@@ -414,6 +414,111 @@ static void aether_route_maintenance_handler(struct k_work *work)
 				  K_SECONDS(60));
 }
 
+/* True if addr is on ctx->denylist. Caller must hold neighbor_lock. */
+static bool addr_is_denied(struct aether_mesh_ctx *ctx, const uint8_t addr[6])
+{
+	for (int i = 0; i < ctx->denylist_count; i++) {
+		if (memcmp(ctx->denylist[i], addr, 6) == 0) {
+			return true;
+		}
+	}
+	return false;
+}
+
+int aether_mesh_deny_neighbor(struct net_if *iface, const uint8_t addr[6])
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	int ret = 0;
+
+	if (!ctx || ctx->iface != iface || !addr) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+
+	if (!addr_is_denied(ctx, addr)) {
+		if (ctx->denylist_count >= CONFIG_AETHER_MAX_DENYLIST) {
+			ret = -ENOMEM;
+		} else {
+			memcpy(ctx->denylist[ctx->denylist_count], addr, 6);
+			ctx->denylist_count++;
+		}
+	}
+
+	/* Evict immediately if already active -- don't wait for the neighbor
+	 * timeout to notice the deny. */
+	if (ret == 0) {
+		for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
+			if (ctx->neighbors[i].active &&
+			    memcmp(ctx->neighbors[i].addr, addr, 6) == 0) {
+				LOG_INF("Denied neighbor %02x:%02x:%02x:%02x:%02x:%02x evicted",
+					addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+				ctx->neighbors[i].active = false;
+			}
+		}
+	}
+
+	k_mutex_unlock(&ctx->neighbor_lock);
+
+	/* Also drop any stale legacy AODV-style route learned directly from the
+	 * denied address (aether_mesh_add_route() on HELLO receipt, hop_count=1) --
+	 * otherwise it lingers up to CONFIG_AETHER_ROUTE_TIMEOUT even though no new
+	 * HELLO from that address can arrive (RX-time drop, see aether_mesh_recv()).
+	 * Only the direct 1-hop route is invalidated here; a legitimate multi-hop
+	 * route learned via a still-allowed next_hop is untouched. */
+	if (ret == 0) {
+		k_mutex_lock(&ctx->route_lock, K_FOREVER);
+		for (int i = 0; i < CONFIG_AETHER_MAX_ROUTES; i++) {
+			if (ctx->routes[i].active &&
+			    memcmp(ctx->routes[i].dest, addr, 6) == 0 &&
+			    memcmp(ctx->routes[i].next_hop, addr, 6) == 0) {
+				LOG_INF("Direct route to denied %02x:%02x:%02x:%02x:%02x:%02x invalidated",
+					addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+				ctx->routes[i].active = false;
+			}
+		}
+		k_mutex_unlock(&ctx->route_lock);
+	}
+
+	return ret;
+}
+
+int aether_mesh_allow_neighbor(struct net_if *iface, const uint8_t addr[6])
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	int ret = -ENOENT;
+
+	if (!ctx || ctx->iface != iface || !addr) {
+		return -EINVAL;
+	}
+
+	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	for (int i = 0; i < ctx->denylist_count; i++) {
+		if (memcmp(ctx->denylist[i], addr, 6) == 0) {
+			/* Swap-remove */
+			ctx->denylist_count--;
+			memcpy(ctx->denylist[i], ctx->denylist[ctx->denylist_count], 6);
+			ret = 0;
+			break;
+		}
+	}
+	k_mutex_unlock(&ctx->neighbor_lock);
+	return ret;
+}
+
+void aether_mesh_denylist_clear(struct net_if *iface)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	if (!ctx || ctx->iface != iface) {
+		return;
+	}
+
+	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	ctx->denylist_count = 0;
+	k_mutex_unlock(&ctx->neighbor_lock);
+}
+
 /* Neighbor management */
 int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
                                 int8_t rssi, int8_t snr)
@@ -426,6 +531,11 @@ int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
 	}
 
 	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+
+	if (addr_is_denied(ctx, addr)) {
+		k_mutex_unlock(&ctx->neighbor_lock);
+		return -EACCES;
+	}
 
 	/* Look for existing neighbor or free slot */
 	for (i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
@@ -446,7 +556,7 @@ int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
 	/* Add new neighbor */
 	if (free_slot >= 0) {
 		memcpy(ctx->neighbors[free_slot].addr, addr, 6);
-		ctx->neighbors[free_slot].node_id = 0;  /* learned later from TREE_ANNOUNCE */
+		memset(ctx->neighbors[free_slot].node_eui, 0, 6);  /* learned later from TREE_ANNOUNCE */
 		ctx->neighbors[free_slot].rssi = rssi;
 		ctx->neighbors[free_slot].snr = snr;
 		ctx->neighbors[free_slot].lqi = 0;
@@ -462,12 +572,15 @@ int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
 	return (free_slot >= 0) ? 0 : -ENOMEM;
 }
 
-void aether_mesh_set_neighbor_node_id(struct net_if *iface, const uint8_t addr[6],
-				      uint32_t node_id)
+static const uint8_t k_zero_eui[6];
+
+void aether_mesh_set_neighbor_identity(struct net_if *iface, const uint8_t addr[6],
+				       const uint8_t node_eui[6])
 {
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
 
-	if (!ctx || ctx->iface != iface || !addr || node_id == 0) {
+	if (!ctx || ctx->iface != iface || !addr || !node_eui ||
+	    memcmp(node_eui, k_zero_eui, 6) == 0) {
 		return;
 	}
 
@@ -475,7 +588,7 @@ void aether_mesh_set_neighbor_node_id(struct net_if *iface, const uint8_t addr[6
 	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
 		if (ctx->neighbors[i].active &&
 		    memcmp(ctx->neighbors[i].addr, addr, 6) == 0) {
-			ctx->neighbors[i].node_id = node_id;
+			memcpy(ctx->neighbors[i].node_eui, node_eui, 6);
 			break;
 		}
 	}
@@ -525,6 +638,41 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 	/* Check TTL */
 	if (hdr.ttl == 0) {
 		LOG_DBG("Dropping packet with TTL=0");
+		net_pkt_unref(pkt);
+		return;
+	}
+
+	/* Bench-test denylist: drop the whole packet before any route/neighbor
+	 * side effect (HELLO's direct-route add included) -- a denied source
+	 * must be completely invisible to routing, not just absent from the
+	 * neighbor table.
+	 *
+	 * Gate on the LINK-LAYER immediate sender (resender), NOT hdr.src (the
+	 * mesh-layer original sender). hdr.src is unchanged across a relay hop --
+	 * a frame the DK relays from a denied node still carries that node's
+	 * hdr.src -- so gating on hdr.src would block the relayed copy too and
+	 * make "deny" indistinguishable from "globally silence this identity
+	 * everywhere in the mesh," breaking exactly the relay case a deny-based
+	 * bench topology test wants to prove. The immediate sender genuinely
+	 * differs between "heard this node directly" and "heard the DK repeat
+	 * it," which is what deny should actually gate: RF adjacency to THIS
+	 * hop, not a global ban on the originator's identity. */
+	struct heymac_context *hm_deny = net_if_l2_data(iface);
+	uint8_t resender[6] = {0};
+
+	if (hm_deny) {
+		resender[4] = hm_deny->last_rx_src.short_addr[0];
+		resender[5] = hm_deny->last_rx_src.short_addr[1];
+	}
+	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	bool denied = addr_is_denied(ctx, resender);
+	k_mutex_unlock(&ctx->neighbor_lock);
+	if (denied) {
+		LOG_DBG("Dropping packet heard directly from denied %02x:%02x "
+			"(orig src %02x:%02x:%02x:%02x:%02x:%02x)",
+			resender[4], resender[5],
+			hdr.src[0], hdr.src[1], hdr.src[2],
+			hdr.src[3], hdr.src[4], hdr.src[5]);
 		net_pkt_unref(pkt);
 		return;
 	}

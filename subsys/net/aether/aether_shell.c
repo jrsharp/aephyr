@@ -11,6 +11,8 @@
 #include <zephyr/net/aether_mesh.h>
 #include <zephyr/net/heymac.h>
 #include <stdlib.h>
+#include <string.h>
+#include <stdio.h>
 
 LOG_MODULE_REGISTER(aether_shell, LOG_LEVEL_INF);
 
@@ -29,12 +31,25 @@ static int cmd_aether_status(const struct shell *shell, size_t argc, char **argv
         return 0;
     }
 
-    /* Local address */
+    /* identity: the durable node_eui -- survives HONR re-join/re-election.
+     * Use this, not the routing address below, to reference the node. */
     shell_print(shell, "Æther Mesh Status:");
-    shell_print(shell, "  addr   %02x:%02x:%02x:%02x:%02x:%02x",
+    shell_print(shell, "  identity  %02x:%02x:%02x:%02x:%02x:%02x",
+                ctx->node_eui[0], ctx->node_eui[1],
+                ctx->node_eui[2], ctx->node_eui[3],
+                ctx->node_eui[4], ctx->node_eui[5]);
+#if defined(CONFIG_AETHER_ROUTING_HONR)
+    shell_print(shell, "  honr addr %02x:%02x:%02x:%02x:%02x:%02x  (routing address"
+                " -- churns with the tree)",
                 ctx->local_addr[0], ctx->local_addr[1],
                 ctx->local_addr[2], ctx->local_addr[3],
                 ctx->local_addr[4], ctx->local_addr[5]);
+#else
+    shell_print(shell, "  addr      %02x:%02x:%02x:%02x:%02x:%02x",
+                ctx->local_addr[0], ctx->local_addr[1],
+                ctx->local_addr[2], ctx->local_addr[3],
+                ctx->local_addr[4], ctx->local_addr[5]);
+#endif
     shell_print(shell, "  net_id 0x%04x", ctx->mesh_net_id);
 
     /* HeyMac layer info */
@@ -119,6 +134,93 @@ static int cmd_aether_send(const struct shell *shell, size_t argc, char **argv)
     return 0;
 }
 
+/* Parse "xx:xx:xx:xx:xx:xx" (colon or bare hex) into a 6-byte address. */
+static int parse_addr(const char *s, uint8_t addr[6])
+{
+    unsigned int b[6];
+    int n = sscanf(s, "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+
+    if (n != 6) {
+        n = sscanf(s, "%2x%2x%2x%2x%2x%2x", &b[0], &b[1], &b[2], &b[3], &b[4], &b[5]);
+    }
+    if (n != 6) {
+        return -EINVAL;
+    }
+    for (int i = 0; i < 6; i++) {
+        addr[i] = (uint8_t)b[i];
+    }
+    return 0;
+}
+
+static int cmd_aether_deny(const struct shell *shell, size_t argc, char **argv)
+{
+    uint8_t addr[6];
+
+    if (argc < 2 || parse_addr(argv[1], addr) < 0) {
+        shell_error(shell, "Usage: aether deny <xx:xx:xx:xx:xx:xx>");
+        return -EINVAL;
+    }
+
+    struct aether_mesh_ctx *ctx = g_mesh_ctx;
+    int ret = aether_mesh_deny_neighbor(ctx ? ctx->iface : NULL, addr);
+
+    if (ret < 0) {
+        shell_error(shell, "deny failed: %d (denylist full?)", ret);
+        return ret;
+    }
+    shell_print(shell, "Denied %02x:%02x:%02x:%02x:%02x:%02x -- dropped at admission, "
+                "evicted if already a neighbor", addr[0], addr[1], addr[2],
+                addr[3], addr[4], addr[5]);
+    return 0;
+}
+
+static int cmd_aether_allow(const struct shell *shell, size_t argc, char **argv)
+{
+    uint8_t addr[6];
+
+    if (argc < 2 || parse_addr(argv[1], addr) < 0) {
+        shell_error(shell, "Usage: aether allow <xx:xx:xx:xx:xx:xx>");
+        return -EINVAL;
+    }
+
+    struct aether_mesh_ctx *ctx = g_mesh_ctx;
+    int ret = aether_mesh_allow_neighbor(ctx ? ctx->iface : NULL, addr);
+
+    if (ret < 0) {
+        shell_error(shell, "%02x:%02x:%02x:%02x:%02x:%02x was not denied",
+                    addr[0], addr[1], addr[2], addr[3], addr[4], addr[5]);
+        return ret;
+    }
+    shell_print(shell, "Allowed %02x:%02x:%02x:%02x:%02x:%02x", addr[0], addr[1],
+                addr[2], addr[3], addr[4], addr[5]);
+    return 0;
+}
+
+static int cmd_aether_denylist(const struct shell *shell, size_t argc, char **argv)
+{
+    ARG_UNUSED(argc);
+
+    struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+    if (argc >= 2 && strcmp(argv[1], "clear") == 0) {
+        aether_mesh_denylist_clear(ctx ? ctx->iface : NULL);
+        shell_print(shell, "Denylist cleared");
+        return 0;
+    }
+
+    if (!ctx) {
+        shell_print(shell, "Æther mesh not initialized");
+        return 0;
+    }
+    shell_print(shell, "Denylist (%u):", ctx->denylist_count);
+    for (int i = 0; i < ctx->denylist_count; i++) {
+        shell_print(shell, "    %02x:%02x:%02x:%02x:%02x:%02x",
+                    ctx->denylist[i][0], ctx->denylist[i][1], ctx->denylist[i][2],
+                    ctx->denylist[i][3], ctx->denylist[i][4], ctx->denylist[i][5]);
+    }
+    return 0;
+}
+
 #ifdef CONFIG_AETHER_LORA_CAD_ENABLED
 static int cmd_aether_cad(const struct shell *shell, size_t argc, char **argv)
 {
@@ -161,6 +263,12 @@ SHELL_STATIC_SUBCMD_SET_CREATE(sub_aether,
 #ifdef CONFIG_AETHER_LORA_CAD_ENABLED
     SHELL_CMD(cad, NULL, "Run CAD test [count=10]", cmd_aether_cad),
 #endif
+    SHELL_CMD(deny, NULL, "Deny a neighbor addr (force topology): aether deny <mac>",
+              cmd_aether_deny),
+    SHELL_CMD(allow, NULL, "Un-deny a neighbor addr: aether allow <mac>",
+              cmd_aether_allow),
+    SHELL_CMD(denylist, NULL, "Show/clear the denylist: aether denylist [clear]",
+              cmd_aether_denylist),
     SHELL_SUBCMD_SET_END
 );
 

@@ -120,6 +120,16 @@ config AETHER_NEIGHBOR_TIMEOUT
 	help
 	  Time before inactive neighbors are considered lost.
 
+config AETHER_MAX_DENYLIST
+	int "Maximum number of denied neighbor addresses"
+	default 8
+	range 2 32
+	help
+	  Size of the bench-test link-denylist (see aether_mesh_deny_neighbor()
+	  and the `aether deny` shell command). Lets a specific neighbor address
+	  be rejected at admission even though it's in radio range -- for forcing
+	  a multi-hop topology on the bench without physical separation.
+
 config AETHER_CONDITIONAL_NET_ID
 	bool "Use conditional mesh network ID optimization"
 	default y

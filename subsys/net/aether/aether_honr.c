@@ -99,7 +99,13 @@ bool aether_honr_should_relay(struct net_if *iface, const uint8_t resender[6],
  * -------------------------------------------------------------------------- */
 
 #define HONR_CHILD_MASK   0x7FFEU /* nibble values 1..14 (bit n = nibble n) */
-#define HONR_ANN_LEN      8U      /* addr(2) + free bitmap(2) + node id(4) */
+#define HONR_ANN_LEN      14U     /* addr(2) + free bitmap(2) + election id(4) +
+				   * announcer's durable node_eui(6). The election id
+				   * is for the root tiebreak ONLY (aether_honr_node_id());
+				   * node_eui is what peer discovery should key on -- see
+				   * aether_mesh_set_neighbor_identity(). Keeping both
+				   * avoids conflating "wins the election" with "who is
+				   * this peer". */
 #define HONR_REQ_LEN      8U      /* joiner id(6) + target parent addr(2) */
 #define HONR_REP_LEN      8U      /* joiner id(6) + assigned addr(2) */
 #define HONR_JOIN_WAIT_MS 2000    /* await a join reply before retrying */
@@ -333,6 +339,7 @@ static void honr_announce_handler(struct k_work *work)
 			(uint8_t)(honr_node_id >> 24), (uint8_t)(honr_node_id >> 16),
 			(uint8_t)(honr_node_id >> 8), (uint8_t)(honr_node_id & 0xFF),
 		};
+		memcpy(&p[8], ctx->node_eui, 6);
 
 		(void)honr_send_ctrl(honr_iface, AETHER_MSG_TREE_ANNOUNCE, p, sizeof(p));
 	}
@@ -456,11 +463,12 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 		peer_id = ((uint32_t)payload[4] << 24) | ((uint32_t)payload[5] << 16) |
 			  ((uint32_t)payload[6] << 8) | payload[7];
 
-		/* Record the announcer's stable node_id against its neighbor entry
-		 * (the neighbor was just (re)created by the recv-path update). Lets
-		 * peer discovery via dev/aether/neighbors carry a durable identity
-		 * that survives the announcer's HONR address churn. */
-		aether_mesh_set_neighbor_node_id(iface, src, peer_id);
+		/* Record the announcer's durable node_eui (bytes 8..13, NOT peer_id
+		 * above -- peer_id is the election tiebreak only) against its
+		 * neighbor entry (the neighbor was just (re)created by the recv-path
+		 * update). Lets peer discovery via dev/aether/neighbors carry a
+		 * durable identity that survives the announcer's HONR address churn. */
+		aether_mesh_set_neighbor_identity(iface, src, &payload[8]);
 
 		/* Dual-root resolution: if we are root and hear another root
 		 * (address 0x0000), the lower node id keeps it and the higher one

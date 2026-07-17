@@ -85,8 +85,12 @@ struct aether_mesh_hdr {
 /* Neighbor entry */
 struct aether_neighbor {
 	uint8_t addr[6];        /* Neighbor (HONR/short) address -- mutable across re-join */
-	uint32_t node_id;       /* Stable peer identity (from TREE_ANNOUNCE); 0 = unknown.
-				 * Survives HONR address churn -- use for durable peer refs. */
+	uint8_t node_eui[6];    /* Peer's durable identity (from TREE_ANNOUNCE), all-zero =
+				 * unknown. Survives HONR address churn -- use for durable
+				 * peer refs. NOT the election tiebreak (aether_honr_node_id()
+				 * is a different, election-only value with no identity
+				 * meaning); this is the same node_eui a peer stamps as src
+				 * on its own §6a broadcasts. */
 	int8_t rssi;           /* Real RSSI (dBm) of last RX from this neighbor */
 	int8_t snr;            /* Real SNR (dB) of last RX from this neighbor */
 	uint8_t lqi;           /* Link quality (unused on DECT; SNR is the metric) */
@@ -159,6 +163,12 @@ struct aether_mesh_ctx {
 	/* Neighbor table */
 	struct aether_neighbor neighbors[CONFIG_AETHER_MAX_NEIGHBORS];
 	struct k_mutex neighbor_lock;
+
+	/* Bench-test link denylist: addresses rejected at admission even though
+	 * in radio range (see aether_mesh_deny_neighbor()). Guarded by
+	 * neighbor_lock -- it's checked/mutated alongside the neighbor table. */
+	uint8_t denylist[CONFIG_AETHER_MAX_DENYLIST][6];
+	uint8_t denylist_count;
 
 	/* Routing table */
 	struct aether_route routes[CONFIG_AETHER_MAX_ROUTES];
@@ -250,17 +260,58 @@ int aether_mesh_update_neighbor(struct net_if *iface, const uint8_t addr[6],
                                 int8_t rssi, int8_t snr);
 
 /**
- * @brief Record a neighbor's stable node identity (from TREE_ANNOUNCE)
+ * @brief Record a neighbor's durable identity (node_eui, from TREE_ANNOUNCE)
  *
- * The neighbor's HONR address is mutable across re-join; node_id is stable.
- * No-op if the neighbor isn't in the table yet.
+ * The neighbor's HONR address is mutable across re-join; node_eui is stable.
+ * No-op if the neighbor isn't in the table yet. NOT the election tiebreak
+ * (aether_honr_node_id()) -- that value is election-only and carries no
+ * identity meaning; this is the same node_eui a peer stamps on its own §6a
+ * broadcasts as src.
  *
  * @param iface Network interface
  * @param addr Neighbor (HONR) address
- * @param node_id Stable node identity
+ * @param node_eui Peer's durable 6-byte identity
  */
-void aether_mesh_set_neighbor_node_id(struct net_if *iface, const uint8_t addr[6],
-                                      uint32_t node_id);
+void aether_mesh_set_neighbor_identity(struct net_if *iface, const uint8_t addr[6],
+                                      const uint8_t node_eui[6]);
+
+/**
+ * @brief Deny a neighbor address: reject it at admission (aether_mesh_update_neighbor
+ * becomes a no-op for this addr) and evict it immediately if already active.
+ *
+ * Gates on the LINK-LAYER immediate sender (HeyMac's last_rx_src), not a frame's
+ * mesh-header src -- so this genuinely models "refuse anything heard directly
+ * from this radio neighbor," and correctly composes with relay: a frame this
+ * addr originated but that arrives via an allowed relay (different immediate
+ * sender) is NOT blocked. That's what makes this usable for forcing a
+ * multi-hop topology on the bench -- e.g. deny two nodes that are in radio
+ * range of each other so a third node's relay becomes the only path -- without
+ * needing physical separation or RF attenuation. It is NOT a global ban on an
+ * identity mesh-wide; it only affects what's accepted on THIS hop.
+ *
+ * @param iface Network interface
+ * @param addr Immediate-neighbor address to deny (HONR/short address space,
+ *             same form dev/aether/neighbors reports)
+ * @return 0 on success, -ENOMEM if the denylist is full, negative error code otherwise
+ */
+int aether_mesh_deny_neighbor(struct net_if *iface, const uint8_t addr[6]);
+
+/**
+ * @brief Remove a previously denied address, allowing it to be (re)admitted as a
+ * neighbor again on its next RX.
+ *
+ * @param iface Network interface
+ * @param addr Neighbor address to un-deny
+ * @return 0 on success, -ENOENT if not on the denylist, negative error code otherwise
+ */
+int aether_mesh_allow_neighbor(struct net_if *iface, const uint8_t addr[6]);
+
+/**
+ * @brief Clear the entire denylist.
+ *
+ * @param iface Network interface
+ */
+void aether_mesh_denylist_clear(struct net_if *iface);
 
 /**
  * @brief Add or update route

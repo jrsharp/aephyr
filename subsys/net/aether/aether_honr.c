@@ -110,7 +110,12 @@ bool aether_honr_should_relay(struct net_if *iface, const uint8_t resender[6],
 #define HONR_REP_LEN      8U      /* joiner id(6) + assigned addr(2) */
 #define HONR_JOIN_WAIT_MS 2000    /* await a join reply before retrying */
 #define HONR_JOIN_COLLECT_MS 2000 /* listen this long for a shallower parent first */
-#define HONR_PARENT_MISS_MAX 3U   /* orphan after this many missed parent announces */
+#define HONR_PARENT_MISS_MAX 5U   /* orphan after this many missed parent announces.
+				   * Was 3: a healthy child under half-duplex RX/LBT
+				   * timing can miss a few consecutive announces without
+				   * the parent being gone; orphaning that eagerly fed
+				   * the re-elect->dual-root->yield->rejoin flap. 5 gives
+				   * transient misses room to recover before orphaning. */
 
 static struct k_work_delayable honr_announce_work;
 static struct k_work_delayable honr_election_work;
@@ -143,6 +148,21 @@ uint32_t aether_honr_node_id(void)
 static uint32_t honr_election_delay_ms(void)
 {
 	return CONFIG_AETHER_HONR_ELECTION_BASE_MS +
+	       (honr_node_id % CONFIG_AETHER_HONR_ELECTION_JITTER_MS);
+}
+
+/* Re-election hold-down. After yielding root or orphaning, a node must wait long
+ * enough to HEAR and JOIN an existing root (>= one announce interval, plus margin
+ * for the ±25% announce jitter) before it self-elects. Otherwise a transient
+ * parent loss re-roots the node into a rival tree, and the resulting yield ->
+ * rejoin -> orphan -> re-elect cycle flaps for minutes -- worst on a desk where
+ * every node hears every other at near-equal RSSI, so elections are near-ties.
+ * The node_id term keeps the lowest id self-electing first if the whole mesh is
+ * genuinely rootless. The INITIAL (boot) election stays short (via
+ * honr_election_delay_ms in honr_start) so a lone node still roots promptly. */
+static uint32_t honr_hold_down_ms(void)
+{
+	return (uint32_t)CONFIG_AETHER_HONR_ANNOUNCE_INTERVAL_SECONDS * 1000U * 2U +
 	       (honr_node_id % CONFIG_AETHER_HONR_ELECTION_JITTER_MS);
 }
 
@@ -238,8 +258,12 @@ static void honr_election_handler(struct k_work *work)
 	LOG_INF("HONR: no tree heard, self-elected root (id %08x)", honr_node_id);
 }
 
-/* Lost a root tiebreak: drop to unjoined and re-arm the election, so we join
- * the winning root (now announcing) or re-elect if it disappears.
+/* Lost a root tiebreak (or orphaned): drop to unjoined and re-arm the election
+ * behind the HOLD-DOWN, so we join the winning/existing root (which is announcing)
+ * rather than re-electing into a rival root before we hear it. On the yield path
+ * the caller falls through to seed the join from the announce in hand, so the
+ * hold-down there is just the fallback if that join fails; on the orphan path the
+ * hold-down is what makes the node patient enough to re-attach instead of flapping.
  */
 static void honr_relinquish_root(void)
 {
@@ -250,7 +274,7 @@ static void honr_relinquish_root(void)
 	honr_set_addr(ctx, 0);
 	honr_join_pending_until = 0;
 	honr_cand_valid = false;
-	k_work_reschedule(&honr_election_work, K_MSEC(honr_election_delay_ms()));
+	k_work_reschedule(&honr_election_work, K_MSEC(honr_hold_down_ms()));
 }
 
 static uint16_t honr_free_children(const struct aether_mesh_ctx *ctx)

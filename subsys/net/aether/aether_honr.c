@@ -237,6 +237,13 @@ static void honr_election_handler(struct k_work *work)
 		return;
 	}
 
+	/* Don't self-elect while a local DFU is streaming: the flash write needs the
+	 * CPU, and we reboot to apply the image anyway. Re-arm and resume after. */
+	if (aether_mesh_dfu_active()) {
+		k_work_reschedule(&honr_election_work, K_MSEC(honr_election_delay_ms()));
+		return;
+	}
+
 	/* Do NOT self-elect while a join is in flight. After a dual-root yield
 	 * (the higher node id relinquishes to join the lower one) we relinquish
 	 * AND re-arm this election; if it fires before the join completes we would
@@ -368,6 +375,15 @@ static void honr_announce_handler(struct k_work *work)
 	struct aether_mesh_ctx *ctx = g_mesh_ctx;
 
 	ARG_UNUSED(work);
+
+	/* Quiesce while a local DFU is streaming: skip announcing AND the root-loss
+	 * check below, so we neither add mesh TX/workq load nor relinquish on a
+	 * (self-inflicted) silence. We reboot to apply the image, which re-forms the
+	 * tree cleanly; children tolerate the brief gap via the hold-down. */
+	if (aether_mesh_dfu_active()) {
+		k_work_reschedule(&honr_announce_work, K_MSEC(honr_announce_delay_ms()));
+		return;
+	}
 
 	/* Root-loss detection: a non-root node that has not heard its parent for
 	 * several announce intervals has lost the tree above it. Relinquish and

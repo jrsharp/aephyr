@@ -334,6 +334,19 @@ int aether_mesh_add_route(struct net_if *iface, const uint8_t dest[6],
 void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt);
 
 /**
+ * @brief Mark a local firmware DFU as active/inactive.
+ *
+ * While active, DECT mesh RX processing and HONR announce/election work are
+ * quiesced so the low-priority flash-write proc thread is not starved by the
+ * radio -- a wired-UART OTA must never be blocked by RF activity. Call true when
+ * a DFU starts (erasing/receiving) and false on complete/error.
+ */
+void aether_mesh_set_dfu_active(bool on);
+
+/** @brief True while a local firmware DFU is streaming (see aether_mesh_set_dfu_active). */
+bool aether_mesh_dfu_active(void);
+
+/**
  * @brief Register callback for received mesh data
  *
  * @param iface Network interface

@@ -15,7 +15,46 @@ LOG_MODULE_REGISTER(aether_mesh, CONFIG_AETHER_MESH_LOG_LEVEL);
 #endif
 #include <zephyr/net/aether_mesh.h>
 #include <zephyr/random/random.h>
+#include <zephyr/sys/atomic.h>
 #include <string.h>
+
+/* Set while a local DFU streams firmware over the inter-chip UART. Gates DECT
+ * mesh RX processing (aether_mesh_recv) + HONR announce/election (aether_honr)
+ * so the low-priority flash-write proc thread is not starved by the RX thread
+ * (PREEMPT 2) or the mesh workq (COOP 2) -- a wired-UART OTA must never be
+ * blocked by radio activity. Cleared on DFU complete/error; the node reboots to
+ * apply, so the brief mesh silence is harmless (children tolerate it via the
+ * HONR hold-down / orphan hysteresis). Set from aether_9p.c's dfu_status. */
+static atomic_t mesh_dfu_active;
+
+bool aether_mesh_dfu_active(void)
+{
+	return atomic_get(&mesh_dfu_active) != 0;
+}
+
+/* Safety net: if a DFU stalls in RECEIVING without a clean complete/error (e.g.
+ * the relay stops streaming and never closes the fid), the quiesce would leave
+ * the node deaf forever. This watchdog force-resumes the mesh after a bound that
+ * comfortably exceeds a healthy flash (a full image streams in ~10s). */
+static void mesh_dfu_watchdog_fn(struct k_work *work)
+{
+	ARG_UNUSED(work);
+	if (aether_mesh_dfu_active()) {
+		atomic_set(&mesh_dfu_active, 0);
+		LOG_WRN("DFU quiesce watchdog fired (>90s) -- force-resuming mesh");
+	}
+}
+static K_WORK_DELAYABLE_DEFINE(mesh_dfu_watchdog, mesh_dfu_watchdog_fn);
+
+void aether_mesh_set_dfu_active(bool on)
+{
+	atomic_set(&mesh_dfu_active, on ? 1 : 0);
+	if (on) {
+		k_work_reschedule(&mesh_dfu_watchdog, K_SECONDS(90));
+	} else {
+		k_work_cancel_delayable(&mesh_dfu_watchdog);
+	}
+}
 
 #ifndef CONFIG_NET_L2_HEYMAC
 /* Fallback address/network ID functions for non-HeyMac transports */
@@ -690,6 +729,15 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		if (pkt) {
 			net_pkt_unref(pkt);
 		}
+		return;
+	}
+
+	/* A local DFU is streaming firmware over the inter-chip UART. Drop DECT
+	 * mesh RX cheaply (before handle_ctrl / recv_cbs) so the RX thread stops
+	 * starving the flash-write proc thread -- radio traffic isn't needed while
+	 * we're being reflashed, and the DFU data doesn't arrive over the radio. */
+	if (aether_mesh_dfu_active()) {
+		net_pkt_unref(pkt);
 		return;
 	}
 

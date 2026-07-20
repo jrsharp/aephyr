@@ -14,6 +14,7 @@ LOG_MODULE_REGISTER(aether_route, CONFIG_AETHER_MESH_LOG_LEVEL);
 #include <zephyr/net/heymac.h>
 #endif
 #include <zephyr/net/aether_mesh.h>
+#include <zephyr/random/random.h>
 #include <string.h>
 
 #ifndef CONFIG_NET_L2_HEYMAC
@@ -48,6 +49,13 @@ extern struct aether_mesh_ctx *g_mesh_ctx;
  * counter keeps that pair unique across conversations to the same peer within
  * the dedup window. */
 #define AETHER_ACK_TIMEOUT_MS 250          /* per-attempt wait for the ACK */
+
+/* Transient DECT channel-busy (LBT -EBUSY) is not a send failure -- back off and
+ * retry the TX so the caller (chat, 9P-over-mesh) never sees it. Separate from the
+ * ACK-retry budget below (that handles a lost frame, this handles a busy channel).
+ * First slice of the reformation-tolerant transport: absorb transient RF. */
+#define AETHER_TX_BUSY_RETRIES   6         /* extra channel-busy spins per TX */
+#define AETHER_TX_BUSY_BACKOFF_MS 15       /* base backoff between busy spins (jittered) */
 
 struct arq_waiter {
 	struct k_sem sem;
@@ -518,11 +526,23 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 
 	ret = -ETIMEDOUT;
 	for (int attempt = 0; attempt <= max_retries; attempt++) {
-		int txr = mesh_tx_frame(iface, AETHER_MSG_DATA, ctx->local_addr, dst,
-					seq, AETHER_PRIORITY_NORMAL, data, len);
+		int txr = -EBUSY;
+
+		/* Absorb a transient busy channel (LBT): spin with jittered backoff a
+		 * few times before giving up, WITHOUT consuming an ACK-retry attempt.
+		 * -EBUSY means the frame never left, so re-sending the same seq is safe
+		 * (the receiver dedups a genuine retransmit by src,seq anyway). */
+		for (int b = 0; b < AETHER_TX_BUSY_RETRIES && txr == -EBUSY; b++) {
+			if (b > 0) {
+				k_msleep(AETHER_TX_BUSY_BACKOFF_MS +
+					 (sys_rand32_get() % AETHER_TX_BUSY_BACKOFF_MS));
+			}
+			txr = mesh_tx_frame(iface, AETHER_MSG_DATA, ctx->local_addr, dst,
+					    seq, AETHER_PRIORITY_NORMAL, data, len);
+		}
 
 		if (txr < 0) {
-			ret = txr;
+			ret = txr;   /* hard error or channel busy past the spin budget */
 			break;
 		}
 		if (k_sem_take(&w->sem, K_MSEC(AETHER_ACK_TIMEOUT_MS)) == 0) {

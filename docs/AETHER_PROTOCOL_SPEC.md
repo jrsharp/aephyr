@@ -403,7 +403,8 @@ This optimization saves 2 bytes (12.5% header reduction) in typical single-netwo
 - **0x02**: Route request (RREQ)
 - **0x03**: Route reply (RREP)
 - **0x04**: Route error (RERR)
-- **0x05**: Hello (neighbor discovery)
+- **0x05**: Hello (neighbor discovery; may carry a service-advertisement
+  payload — see 4.4.1)
 - **0x06**: Tree announcement
 - **0x07**: Tree join request
 - **0x08**: Tree join reply
@@ -414,6 +415,31 @@ This optimization saves 2 bytes (12.5% header reduction) in typical single-netwo
 - **0x0D**: Emergency
 - **0x0E**: Reserved
 - **0x0F**: Reserved
+
+#### 4.4.1 Hello Service Advertisement (optional payload)
+
+A Hello may carry a service advertisement so nodes learn who is on the
+mesh and roughly what they offer (discovery metadata only — resolution
+is a real 9P attach over the reliable transport):
+
+```
+[namelen:u8] [name:namelen] [nsvc:u8] ( [svclen:u8] [svc:svclen] )*
+```
+
+- `name` is the node's self-asserted display label; the source address
+  in the mesh header remains the node's identity key.
+- Service names are short symbolic atoms (`9fs`, `chat`, `term`) —
+  never addresses or ports.
+- Names are restricted to `[a-z0-9-]` (first char alphanumeric, max
+  15 bytes); receivers MUST drop any advertisement violating length,
+  charset, or exact-length framing (no trailing bytes) — reject, do
+  not repair. A malformed advertisement drops the observation, not
+  the Hello's neighbor-table effects.
+- A Hello with zero payload is a legacy beacon: the peer is still
+  observed, nameless and serviceless.
+- Bounds: at most 4 services of at most 15 bytes each; worst-case
+  payload 81 bytes, within the 128-byte first-fragment budget.
+
 
 ### 4.5 Mesh Constants
 

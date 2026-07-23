@@ -201,6 +201,32 @@ config AETHER_MESH_WORKQ_STACK_SIZE
 	  scheduler operation) from delivery context.  4096 is comfortable for
 	  that; only raise it where the static DRAM is available.
 
+config AETHER_SVCDISC
+	bool "Æther service discovery (beacon advertisements + peer table)"
+	default y
+	help
+	  Piggyback a service advertisement (node name + symbolic service
+	  names) on the HELLO beacon and keep a bounded table of heard
+	  peers.  Discovery metadata only: resolution is a real 9P attach.
+
+config AETHER_SVCDISC_MAX_PEERS
+	int "Known-peer table size"
+	depends on AETHER_SVCDISC
+	default 32
+	help
+	  Entries in the static known-peer table (~100 B each, allocated
+	  from PSRAM when available).  Oldest entries are evicted when
+	  full, except within the recent-heard guard window.
+
+config AETHER_SVCDISC_MAX_AGE
+	int "Peer age-out (seconds)"
+	depends on AETHER_SVCDISC
+	default 600
+	help
+	  Drop peers not heard from within this window.  Advisory aging
+	  only — liveness is discovered at attach time, and HELLO
+	  intervals stretch under stable-neighbor backoff.
+
 endif # AETHER_MESH
 
 config AETHER_LORA

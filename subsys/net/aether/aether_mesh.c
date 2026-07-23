@@ -15,6 +15,9 @@ LOG_MODULE_REGISTER(aether_mesh, CONFIG_AETHER_MESH_LOG_LEVEL);
 #endif
 #include <zephyr/net/aether_mesh.h>
 #include <zephyr/net/aether_reliable.h>
+#ifdef CONFIG_AETHER_SVCDISC
+#include <zephyr/net/aether_svcdisc.h>
+#endif
 #include <zephyr/random/random.h>
 #include <string.h>
 #if defined(CONFIG_SHARED_MULTI_HEAP)
@@ -281,6 +284,13 @@ int aether_mesh_init(struct net_if *iface, uint16_t mesh_net_id)
 
 	g_mesh_ctx = ctx;
 
+#ifdef CONFIG_AETHER_SVCDISC
+	/* Non-fatal: the mesh runs fine without the discovery table. */
+	if (aether_svcdisc_init() < 0) {
+		LOG_WRN("service discovery disabled (peer table alloc failed)");
+	}
+#endif
+
 	/* Bring up the reliable-datagram engine + its tick (§4.6). */
 	aether_reliable_glue_init();
 
@@ -348,11 +358,25 @@ int aether_mesh_send_hello(struct net_if *iface)
 	struct net_pkt *pkt;
 	uint8_t hdr_buf[32];
 	int hdr_len;
+	int adv_len = 0;
 	int ret;
+
+#ifdef CONFIG_AETHER_SVCDISC
+	uint8_t adv[AETHER_SVCADV_MAX];
+#endif
 
 	if (!ctx || ctx->iface != iface) {
 		return -EINVAL;
 	}
+
+#ifdef CONFIG_AETHER_SVCDISC
+	/* Piggyback the service advertisement (name + service list) on the
+	 * beacon.  0 bytes when there's nothing to say — a legacy bare HELLO. */
+	adv_len = aether_svcdisc_build_adv(adv, sizeof(adv));
+	if (adv_len < 0) {
+		adv_len = 0;
+	}
+#endif
 
 	/* Build hello header */
 	memset(&hdr, 0, sizeof(hdr));
@@ -362,7 +386,7 @@ int aether_mesh_send_hello(struct net_if *iface)
 	memset(hdr.dst, 0xFF, 6);  /* Broadcast */
 	hdr.seq_no = ctx->seq_no++;
 	hdr.qos_security = (AETHER_PRIORITY_LOW << 6) | (AETHER_DELIV_BESTEFFORT << 5);
-	hdr.length = 0;  /* No payload */
+	hdr.length = adv_len;
 
 	/* Optimize network ID */
 #ifdef CONFIG_NET_L2_HEYMAC
@@ -383,7 +407,8 @@ int aether_mesh_send_hello(struct net_if *iface)
 	}
 
 	/* Allocate packet */
-	pkt = net_pkt_alloc_with_buffer(iface, hdr_len, AF_UNSPEC, 0, K_NO_WAIT);
+	pkt = net_pkt_alloc_with_buffer(iface, hdr_len + adv_len, AF_UNSPEC, 0,
+					K_NO_WAIT);
 	if (!pkt) {
 		LOG_ERR("Failed to allocate hello packet");
 		return -ENOMEM;
@@ -396,6 +421,17 @@ int aether_mesh_send_hello(struct net_if *iface)
 		net_pkt_unref(pkt);
 		return ret;
 	}
+
+#ifdef CONFIG_AETHER_SVCDISC
+	if (adv_len > 0) {
+		ret = net_pkt_write(pkt, adv, adv_len);
+		if (ret < 0) {
+			LOG_ERR("Failed to write hello adv: %d", ret);
+			net_pkt_unref(pkt);
+			return ret;
+		}
+	}
+#endif
 
 	/* Send via HeyMac layer */
 	net_if_queue_tx(ctx->iface, pkt);
@@ -443,6 +479,12 @@ static void aether_route_maintenance_handler(struct k_work *work)
 		}
 	}
 	k_mutex_unlock(&ctx->route_lock);
+
+#ifdef CONFIG_AETHER_SVCDISC
+	/* Advisory aging of the discovery peer table — liveness is still
+	 * only discovered at attach time. */
+	aether_peer_age(now, CONFIG_AETHER_SVCDISC_MAX_AGE * 1000);
+#endif
 
 	/* Schedule next maintenance */
 	k_work_schedule_for_queue(&ctx->mesh_workq, &ctx->route_maintenance_work,
@@ -575,11 +617,31 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 	switch (hdr.type) {
 	case AETHER_MSG_HELLO:
 		LOG_DBG("Received hello from %02x:%02x:%02x:%02x:%02x:%02x",
-			hdr.src[0], hdr.src[1], hdr.src[2], 
+			hdr.src[0], hdr.src[1], hdr.src[2],
 			hdr.src[3], hdr.src[4], hdr.src[5]);
 		ctx->hello_received++;
 		/* Add direct route to hello sender */
 		aether_mesh_add_route(iface, hdr.src, hdr.src, 1);
+#ifdef CONFIG_AETHER_SVCDISC
+		{
+			size_t alen = MIN(hdr.length,
+					  (uint16_t)(len - hdr_len));
+			int8_t rssi = -50;  /* same fallback as the
+					     * neighbor-table TODO */
+
+#ifdef CONFIG_AETHER_LORA
+			struct aether_lora_stats st;
+
+			aether_lora_get_stats(&st);
+			if (st.rx_count > 0) {
+				rssi = (int8_t)CLAMP(st.last_rssi, -127, 0);
+			}
+#endif
+			aether_svcdisc_ingest_frags(hdr.src, rssi,
+						    pkt->buffer, hdr_len,
+						    alen, k_uptime_get_32());
+		}
+#endif
 		net_pkt_unref(pkt);
 		break;
 	

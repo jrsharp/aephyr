@@ -50,6 +50,15 @@ extern struct aether_mesh_ctx *g_mesh_ctx;
  * the dedup window. */
 #define AETHER_ACK_TIMEOUT_MS 250          /* per-attempt wait for the ACK */
 
+/* Binary-exponential backoff between ACK-timeout RETRANSMITS (CSMA/CA). Without
+ * it, two nodes that collide time out together and retransmit in lock-step,
+ * colliding again every retry -- the dominant loss under simultaneous two-way
+ * traffic. Each retry waits a uniform-random time in a contention window that
+ * doubles per attempt (capped), so contending senders de-sync. */
+#define AETHER_ACK_BACKOFF_MS     40       /* base contention window (doubles per retry) */
+#define AETHER_ACK_BACKOFF_MAX_MS 300      /* window cap */
+#define AETHER_ACK_BACKOFF_FLOOR_MS 5      /* min wait, so two picks are never both 0 */
+
 /* Transient DECT channel-busy (LBT -EBUSY) is not a send failure -- back off and
  * retry the TX so the caller (chat, 9P-over-mesh) never sees it. Separate from the
  * ACK-retry budget below (that handles a lost frame, this handles a busy channel).
@@ -565,6 +574,17 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 		if (k_sem_take(&w->sem, K_MSEC(AETHER_ACK_TIMEOUT_MS)) == 0) {
 			ret = 0;
 			break;
+		}
+		/* No ACK: collision or loss. Back off a random time in a contention
+		 * window that doubles per attempt before retransmitting, so two senders
+		 * that collided don't retransmit in lock-step and collide again. */
+		if (attempt < max_retries) {
+			uint32_t cw = (uint32_t)AETHER_ACK_BACKOFF_MS << attempt;
+
+			if (cw > AETHER_ACK_BACKOFF_MAX_MS) {
+				cw = AETHER_ACK_BACKOFF_MAX_MS;
+			}
+			k_msleep(AETHER_ACK_BACKOFF_FLOOR_MS + (sys_rand32_get() % cw));
 		}
 	}
 	arq_free(w);

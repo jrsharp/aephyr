@@ -481,6 +481,23 @@ int aether_mesh_send(struct net_if *iface, const uint8_t dst[6],
 	return ret;
 }
 
+/* Broadcast this node's durable node_eui<->HONR binding, flooded (DEFAULT_TTL so
+ * intermediate nodes re-flood it, dedup-bounded) so multi-hop peers can resolve
+ * us by our stable identity. src = our current HONR routing address, payload =
+ * our node_eui. Best-effort; the periodic re-send plus the receiver's generous
+ * binding aging cover a dropped beacon. */
+int aether_mesh_send_binding(struct net_if *iface)
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	static const uint8_t bcast[6] = {0xff, 0xff, 0xff, 0xff, 0xff, 0xff};
+
+	if (!ctx || ctx->iface != iface) {
+		return -EINVAL;
+	}
+	return mesh_tx_frame(iface, AETHER_MSG_BINDING, ctx->local_addr, bcast,
+			     alloc_seq(ctx), AETHER_PRIORITY_LOW, ctx->node_eui, 6);
+}
+
 /* Reliable mesh send: stop-and-wait ARQ over the routed (multi-hop) TX core.
  * Unicast waits for the destination's end-to-end ACK and retransmits on
  * timeout; broadcast has no single acker so it is best-effort one-shot (the

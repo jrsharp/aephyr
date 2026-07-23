@@ -301,6 +301,9 @@ static void aether_hello_work_handler(struct k_work *work)
 	int stable_neighbors = 0;
 
 	aether_mesh_send_hello(ctx->iface);
+	/* Piggyback the flooded node_eui<->HONR binding beacon on the HELLO cadence
+	 * so eui addressing resolves to multi-hop peers, not just direct neighbors. */
+	aether_mesh_send_binding(ctx->iface);
 
 	/* Count stable neighbors (active, seen recently, good signal) */
 	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
@@ -635,11 +638,74 @@ void aether_mesh_set_neighbor_identity(struct net_if *iface, const uint8_t addr[
 }
 
 /* Resolve a durable node_eui (the app-facing endpoint identity) to the peer's
- * CURRENT HONR routing address, for unicast TX. The binding is learned from
- * TREE_ANNOUNCE (aether_mesh_set_neighbor_identity) and tracks HONR churn, so a
- * caller keyed on the stable eui always routes to the live address. Returns 0
- * and fills addr_out on a hit; -ENOENT if no active neighbor carries this eui
- * yet; -EINVAL on bad args. */
+/* How long a flooded binding stays usable without a refreshing beacon. Generous
+ * (minutes) vs the neighbor table's ~60s so a briefly-quiet multi-hop peer stays
+ * resolvable. */
+#define AETHER_BINDING_TTL_MS 300000U
+
+/* Record/refresh a node_eui<->HONR binding learned from a BINDING beacon.
+ * Caller must hold neighbor_lock. Upserts by node_eui (stable key); on churn the
+ * addr is updated. Evicts the stalest slot when full. */
+static void binding_upsert(struct aether_mesh_ctx *ctx, const uint8_t node_eui[6],
+			   const uint8_t addr[6])
+{
+	int free_slot = -1, oldest = 0;
+	uint32_t now = k_uptime_get_32();
+
+	if (memcmp(node_eui, k_zero_eui, 6) == 0) {
+		return;
+	}
+	for (int i = 0; i < AETHER_MAX_BINDINGS; i++) {
+		if (ctx->bindings[i].valid &&
+		    memcmp(ctx->bindings[i].node_eui, node_eui, 6) == 0) {
+			memcpy(ctx->bindings[i].addr, addr, 6);
+			ctx->bindings[i].last_seen = now;
+			return;
+		}
+		if (!ctx->bindings[i].valid && free_slot < 0) {
+			free_slot = i;
+		}
+		if (ctx->bindings[i].last_seen < ctx->bindings[oldest].last_seen) {
+			oldest = i;
+		}
+	}
+	int slot = (free_slot >= 0) ? free_slot : oldest;
+
+	memcpy(ctx->bindings[slot].node_eui, node_eui, 6);
+	memcpy(ctx->bindings[slot].addr, addr, 6);
+	ctx->bindings[slot].last_seen = now;
+	ctx->bindings[slot].valid = true;
+}
+
+/* Look up a fresh binding by node_eui (dir=0 -> fill addr_out) or by addr
+ * (dir=1 -> fill node_eui out). Caller must hold neighbor_lock. Returns 0/-ENOENT. */
+static int binding_lookup(struct aether_mesh_ctx *ctx, int dir,
+			  const uint8_t key[6], uint8_t out[6])
+{
+	uint32_t now = k_uptime_get_32();
+
+	for (int i = 0; i < AETHER_MAX_BINDINGS; i++) {
+		if (!ctx->bindings[i].valid ||
+		    (now - ctx->bindings[i].last_seen) > AETHER_BINDING_TTL_MS) {
+			continue;
+		}
+		const uint8_t *k = dir == 0 ? ctx->bindings[i].node_eui : ctx->bindings[i].addr;
+		const uint8_t *v = dir == 0 ? ctx->bindings[i].addr : ctx->bindings[i].node_eui;
+
+		if (memcmp(k, key, 6) == 0) {
+			memcpy(out, v, 6);
+			return 0;
+		}
+	}
+	return -ENOENT;
+}
+
+/* Resolve a durable node_eui (the app-facing endpoint identity) to the peer's
+ * CURRENT HONR routing address, for unicast TX. Bindings come from the flooded
+ * BINDING beacon (network-wide, multi-hop) with the direct-neighbor table as a
+ * fallback; both track HONR churn, so a caller keyed on the stable eui always
+ * routes to the live address. Returns 0 and fills addr_out on a hit; -ENOENT if
+ * no binding for this eui is known yet; -EINVAL on bad args. */
 int aether_mesh_eui_to_addr(struct net_if *iface, const uint8_t node_eui[6],
 			    uint8_t addr_out[6])
 {
@@ -651,6 +717,11 @@ int aether_mesh_eui_to_addr(struct net_if *iface, const uint8_t node_eui[6],
 		return -EINVAL;
 	}
 	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	ret = binding_lookup(ctx, 0, node_eui, addr_out);
+	if (ret == 0) {
+		k_mutex_unlock(&ctx->neighbor_lock);
+		return 0;
+	}
 	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
 		if (ctx->neighbors[i].active &&
 		    memcmp(ctx->neighbors[i].node_eui, node_eui, 6) == 0) {
@@ -677,6 +748,11 @@ int aether_mesh_addr_to_eui(struct net_if *iface, const uint8_t addr[6],
 		return -EINVAL;
 	}
 	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	ret = binding_lookup(ctx, 1, addr, eui_out);
+	if (ret == 0) {
+		k_mutex_unlock(&ctx->neighbor_lock);
+		return 0;
+	}
 	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
 		if (ctx->neighbors[i].active &&
 		    memcmp(ctx->neighbors[i].addr, addr, 6) == 0 &&
@@ -1049,6 +1125,35 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		net_pkt_unref(pkt);
 		break;
 #endif
+
+	case AETHER_MSG_BINDING:
+		/* Flooded node_eui<->HONR binding beacon: payload is the originator's
+		 * durable node_eui, hdr.src its current HONR routing address. Record it
+		 * (lets us resolve this peer even when it is several hops away -- the
+		 * neighbor table only covers direct RF neighbors), then re-flood once
+		 * with TTL-1. The (src,seq) dedup above bounds it to one relay per node.
+		 * Skip our own beacon echoed back. */
+		if (hdr.length >= 6 &&
+		    memcmp(buf + hdr_len, ctx->node_eui, 6) != 0) {
+			k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+			binding_upsert(ctx, buf + hdr_len, hdr.src);
+			k_mutex_unlock(&ctx->neighbor_lock);
+
+			if (hdr.ttl > 1) {
+				struct net_pkt *fwd = net_pkt_clone(pkt, K_NO_WAIT);
+
+				if (fwd) {
+					if (fwd->buffer && fwd->buffer->data) {
+						fwd->buffer->data[2] = hdr.ttl - 1; /* TTL at off 2 */
+					}
+					net_pkt_lladdr_dst(fwd)->len = 0; /* re-broadcast (type-1) */
+					net_if_queue_tx(iface, fwd);
+					ctx->packets_forwarded++;
+				}
+			}
+		}
+		net_pkt_unref(pkt);
+		break;
 
 	default:
 		LOG_DBG("Received unknown mesh message type: %d", hdr.type);

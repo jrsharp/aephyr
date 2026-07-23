@@ -59,6 +59,7 @@ extern "C" {
 #define AETHER_MSG_KEY_EXCHANGE  0x0B
 #define AETHER_MSG_MULTICAST     0x0C
 #define AETHER_MSG_EMERGENCY     0x0D
+#define AETHER_MSG_BINDING       0x0E  /* flooded node_eui<->HONR binding beacon */
 
 /* Limits */
 #define AETHER_MAX_NODES   128
@@ -109,6 +110,19 @@ struct aether_route {
 	bool active;           /* Route is active */
 };
 
+/* Network-wide durable-identity binding: maps a node's stable node_eui to its
+ * current HONR routing address, learned from the flooded AETHER_MSG_BINDING
+ * beacon (so it works for NON-neighbors, i.e. multi-hop peers -- unlike the
+ * neighbor table, which only covers direct RF neighbors). Aged generously; a
+ * fresh beacon refreshes/updates the HONR address on churn. */
+#define AETHER_MAX_BINDINGS 24
+struct aether_binding {
+	uint8_t node_eui[6];   /* durable identity (stable) */
+	uint8_t addr[6];       /* current HONR routing address (mutable) */
+	uint32_t last_seen;    /* uptime ms of the last beacon */
+	bool valid;
+};
+
 /**
  * @brief Callback for received mesh data
  *
@@ -151,6 +165,10 @@ struct aether_mesh_ctx {
 	 * stay unique while the HONR address is 0x0000 for root/unjoined). Use this,
 	 * never local_addr, whenever a *stable* reference to this node is needed. */
 	uint8_t node_eui[6];
+
+	/* Network-wide node_eui<->HONR bindings (from the flooded BINDING beacon),
+	 * so eui addressing resolves to peers beyond direct RF range (multi-hop). */
+	struct aether_binding bindings[AETHER_MAX_BINDINGS];
 
 	/* Application receive callback */
 	/* Multiple recv callbacks: the /net/aether datagram service and the chat
@@ -301,6 +319,14 @@ int aether_mesh_eui_to_addr(struct net_if *iface, const uint8_t node_eui[6],
  */
 int aether_mesh_addr_to_eui(struct net_if *iface, const uint8_t addr[6],
                             uint8_t eui_out[6]);
+
+/**
+ * @brief Broadcast (flooded) this node's node_eui<->HONR binding beacon.
+ *
+ * Lets multi-hop peers resolve this node by its stable durable identity. Sent
+ * periodically alongside HELLO; best-effort. @return 0 on success.
+ */
+int aether_mesh_send_binding(struct net_if *iface);
 
 /**
  * @brief Deny a neighbor address: reject it at admission (aether_mesh_update_neighbor

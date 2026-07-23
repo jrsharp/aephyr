@@ -717,11 +717,12 @@ int aether_mesh_eui_to_addr(struct net_if *iface, const uint8_t node_eui[6],
 		return -EINVAL;
 	}
 	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
-	ret = binding_lookup(ctx, 0, node_eui, addr_out);
-	if (ret == 0) {
-		k_mutex_unlock(&ctx->neighbor_lock);
-		return 0;
-	}
+	/* Neighbor table FIRST: it is the freshest source for a directly-heard peer
+	 * (refreshed by every HELLO/TREE_ANNOUNCE, ~seconds). The flooded binding
+	 * table is staler (beacon cadence) so it is only a FALLBACK for peers we do
+	 * NOT hear directly (multi-hop). Order matters: a stale flooded binding must
+	 * never shadow a fresh neighbor entry, or a peer that just re-parented would
+	 * resolve to its OLD HONR address and the datagram would misroute. */
 	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
 		if (ctx->neighbors[i].active &&
 		    memcmp(ctx->neighbors[i].node_eui, node_eui, 6) == 0) {
@@ -729,6 +730,9 @@ int aether_mesh_eui_to_addr(struct net_if *iface, const uint8_t node_eui[6],
 			ret = 0;
 			break;
 		}
+	}
+	if (ret != 0) {
+		ret = binding_lookup(ctx, 0, node_eui, addr_out);
 	}
 	k_mutex_unlock(&ctx->neighbor_lock);
 	return ret;
@@ -748,11 +752,9 @@ int aether_mesh_addr_to_eui(struct net_if *iface, const uint8_t addr[6],
 		return -EINVAL;
 	}
 	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
-	ret = binding_lookup(ctx, 1, addr, eui_out);
-	if (ret == 0) {
-		k_mutex_unlock(&ctx->neighbor_lock);
-		return 0;
-	}
+	/* Neighbor table first (fresh), flooded binding table as fallback -- same
+	 * ordering rationale as aether_mesh_eui_to_addr: never let a stale binding
+	 * shadow a fresh direct-neighbor entry. */
 	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
 		if (ctx->neighbors[i].active &&
 		    memcmp(ctx->neighbors[i].addr, addr, 6) == 0 &&
@@ -761,6 +763,9 @@ int aether_mesh_addr_to_eui(struct net_if *iface, const uint8_t addr[6],
 			ret = 0;
 			break;
 		}
+	}
+	if (ret != 0) {
+		ret = binding_lookup(ctx, 1, addr, eui_out);
 	}
 	k_mutex_unlock(&ctx->neighbor_lock);
 	return ret;

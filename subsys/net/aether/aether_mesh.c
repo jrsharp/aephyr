@@ -634,6 +634,62 @@ void aether_mesh_set_neighbor_identity(struct net_if *iface, const uint8_t addr[
 	k_mutex_unlock(&ctx->neighbor_lock);
 }
 
+/* Resolve a durable node_eui (the app-facing endpoint identity) to the peer's
+ * CURRENT HONR routing address, for unicast TX. The binding is learned from
+ * TREE_ANNOUNCE (aether_mesh_set_neighbor_identity) and tracks HONR churn, so a
+ * caller keyed on the stable eui always routes to the live address. Returns 0
+ * and fills addr_out on a hit; -ENOENT if no active neighbor carries this eui
+ * yet; -EINVAL on bad args. */
+int aether_mesh_eui_to_addr(struct net_if *iface, const uint8_t node_eui[6],
+			    uint8_t addr_out[6])
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	int ret = -ENOENT;
+
+	if (!ctx || ctx->iface != iface || !node_eui || !addr_out ||
+	    memcmp(node_eui, k_zero_eui, 6) == 0) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
+		if (ctx->neighbors[i].active &&
+		    memcmp(ctx->neighbors[i].node_eui, node_eui, 6) == 0) {
+			memcpy(addr_out, ctx->neighbors[i].addr, 6);
+			ret = 0;
+			break;
+		}
+	}
+	k_mutex_unlock(&ctx->neighbor_lock);
+	return ret;
+}
+
+/* Reverse of the above: resolve a peer's HONR routing address (the src stamped
+ * on a received unicast frame) back to its durable node_eui, so the RX path can
+ * hand the conversation layer the STABLE identity instead of the churning route.
+ * Returns 0/-ENOENT/-EINVAL as above. */
+int aether_mesh_addr_to_eui(struct net_if *iface, const uint8_t addr[6],
+			    uint8_t eui_out[6])
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+	int ret = -ENOENT;
+
+	if (!ctx || ctx->iface != iface || !addr || !eui_out) {
+		return -EINVAL;
+	}
+	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
+	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
+		if (ctx->neighbors[i].active &&
+		    memcmp(ctx->neighbors[i].addr, addr, 6) == 0 &&
+		    memcmp(ctx->neighbors[i].node_eui, k_zero_eui, 6) != 0) {
+			memcpy(eui_out, ctx->neighbors[i].node_eui, 6);
+			ret = 0;
+			break;
+		}
+	}
+	k_mutex_unlock(&ctx->neighbor_lock);
+	return ret;
+}
+
 /* Forward a unicast frame (DATA or ACK) that is not addressed to us, toward
  * hdr->dst. Stateless HONR next-hop selection: only the node that is actually
  * the next hop from this frame's immediate sender relays; everyone else who

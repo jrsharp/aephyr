@@ -276,6 +276,33 @@ void aether_mesh_set_neighbor_identity(struct net_if *iface, const uint8_t addr[
                                       const uint8_t node_eui[6]);
 
 /**
+ * @brief Resolve a durable node_eui to the peer's current HONR routing address.
+ *
+ * The app/aether layer addresses peers by their stable durable identity
+ * (node_eui / CGA); this maps that to the live HONR route for unicast TX, using
+ * the eui<->addr binding learned from TREE_ANNOUNCE (so it tracks HONR churn).
+ *
+ * @param iface Network interface
+ * @param node_eui Peer's durable 6-byte identity
+ * @param addr_out Filled with the peer's current HONR address on success
+ * @return 0 on success, -ENOENT if no active neighbor carries this eui, -EINVAL on bad args
+ */
+int aether_mesh_eui_to_addr(struct net_if *iface, const uint8_t node_eui[6],
+                            uint8_t addr_out[6]);
+
+/**
+ * @brief Resolve a HONR routing address (a received unicast frame's src) back to
+ *        the peer's durable node_eui, so the RX path presents the stable identity.
+ *
+ * @param iface Network interface
+ * @param addr Peer's HONR address (as stamped on the frame src)
+ * @param eui_out Filled with the peer's durable node_eui on success
+ * @return 0 on success, -ENOENT if unknown, -EINVAL on bad args
+ */
+int aether_mesh_addr_to_eui(struct net_if *iface, const uint8_t addr[6],
+                            uint8_t eui_out[6]);
+
+/**
  * @brief Deny a neighbor address: reject it at admission (aether_mesh_update_neighbor
  * becomes a no-op for this addr) and evict it immediately if already active.
  *

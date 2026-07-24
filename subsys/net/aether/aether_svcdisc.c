@@ -37,6 +37,11 @@ struct disc_state {
 static struct disc_state *st;
 static K_MUTEX_DEFINE(disc_lock);
 
+/* Name set before init (boot settings load runs before the radio/mesh
+ * bringup thread finishes) parks here and is applied by init.  Small
+ * enough to live in DRAM. */
+static char pre_name[AETHER_SVC_NAME_MAX + 1];
+
 bool aether_svc_name_ok(const char *name)
 {
 	size_t len;
@@ -169,6 +174,9 @@ int aether_svcdisc_init(void)
 		return -ENOMEM;
 	}
 	memset(st, 0, sizeof(*st));
+	k_mutex_lock(&disc_lock, K_FOREVER);
+	memcpy(st->self.name, pre_name, sizeof(st->self.name));
+	k_mutex_unlock(&disc_lock);
 	return 0;
 }
 
@@ -295,18 +303,19 @@ int aether_peer_get_at(size_t idx, struct aether_peer *out)
 
 int aether_svcdisc_set_name(const char *name)
 {
-	if (st == NULL) {
-		return -ENODEV;
-	}
 	if (name && name[0] && !aether_svc_name_ok(name)) {
 		return -EINVAL;
 	}
 	k_mutex_lock(&disc_lock, K_FOREVER);
+	/* Before init the name parks in pre_name (applied by init); after,
+	 * it goes straight into the live state. */
+	char *dst = st ? st->self.name : pre_name;
+
 	if (name == NULL) {
-		st->self.name[0] = '\0';
+		dst[0] = '\0';
 	} else {
-		strncpy(st->self.name, name, AETHER_SVC_NAME_MAX);
-		st->self.name[AETHER_SVC_NAME_MAX] = '\0';
+		strncpy(dst, name, AETHER_SVC_NAME_MAX);
+		dst[AETHER_SVC_NAME_MAX] = '\0';
 	}
 	k_mutex_unlock(&disc_lock);
 	return 0;

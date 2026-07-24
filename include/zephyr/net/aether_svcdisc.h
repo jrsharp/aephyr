@@ -115,7 +115,8 @@ int aether_peer_get_at(size_t idx, struct aether_peer *out);
 /* ---- self (what this node advertises) ---- */
 
 /* Set this node's beacon name ("" or NULL to clear).  -EINVAL if not a
- * valid name. */
+ * valid name.  Callable before init (boot settings load precedes mesh
+ * bringup): the name parks in a pending buffer and init applies it. */
 int aether_svcdisc_set_name(const char *name);
 
 /* Replace the advertised service list.  The list is derived from what

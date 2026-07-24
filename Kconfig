@@ -227,6 +227,16 @@ config AETHER_SVCDISC_MAX_AGE
 	  only — liveness is discovered at attach time, and HELLO
 	  intervals stretch under stable-neighbor backoff.
 
+config AETHER_NET_FS
+	bool "9P /net/aether protocol directory (needs app srv framework)"
+	help
+	  The canonical Plan 9-style /net/aether file server
+	  (clone/<N>/{ctl,data,...}, self/, peers/) over the reliable
+	  datagram engine.  The consuming app must provide FRST's srv
+	  framework and mem allocator ("srv.h" and "mem.h" under
+	  <app>/src) plus the 9p4z module; see aether_net_fs.c for the
+	  full contract.  Enabled by FRST decks and Æther gateways.
+
 endif # AETHER_MESH
 
 config AETHER_LORA

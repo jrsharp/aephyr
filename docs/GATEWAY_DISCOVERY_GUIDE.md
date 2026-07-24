@@ -85,6 +85,10 @@ consequences to keep straight:
   than calling `aether_svcdisc_set_services()` from new places.
 - Beacons carry symbolic names only — **no addresses, no ports**.  A
   service maps to an attach aname on ONE listener, selected at Tattach.
+  Wire-aname convention: `9fs` = the whole exported namespace = **empty**
+  aname (the 9p4z server walks a non-empty aname as a path from the
+  export root); FRST's dialer normalizes this.  Other services keep
+  their atom, and the server must serve a tree by that name.
 - Advertisement is gossip; correctness lives in the attach (CGA check
   included).  No TTLs, no leases, no sequence numbers — do not add a
   consistency protocol to the beacon.

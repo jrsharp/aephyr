@@ -130,6 +130,8 @@ struct dect_phy_stats {
 	uint32_t tx_err;      /**< Transmits that failed for other reasons. */
 	uint32_t rx_pcc;      /**< Control headers (PCC) detected off-air. */
 	uint32_t rx_frames;   /**< Data frames (PDC) received. */
+	uint32_t tx_bytes;    /**< Payload bytes in successfully transmitted frames. */
+	uint32_t rx_bytes;    /**< Payload bytes in decoded received data frames. */
 	int16_t last_rssi_dbm; /**< RSSI of the most recently received frame, dBm. */
 	int8_t last_snr_db;    /**< SNR of the most recently received frame, dB. */
 	int16_t last_temp_c;   /**< Modem temperature at the last operation, deg C
@@ -147,6 +149,19 @@ void dect_phy_get_stats(struct dect_phy_stats *out);
  * Any output pointer may be NULL.
  */
 void dect_phy_get_info(uint16_t *device_id, uint16_t *carrier, int8_t *tx_power);
+
+/**
+ * @brief Format a carrier's band + centre frequency as human-readable text.
+ *
+ * Looks the band up live from the modem's reported band table and applies the
+ * ETSI channel raster (Fc[kHz] = 450144 + carrier*864), e.g. "band 4, 914.976 MHz".
+ * Falls back to "carrier N, F MHz" if the carrier is outside every reported band.
+ *
+ * @param carrier DECT NR+ carrier number.
+ * @param buf     Output buffer.
+ * @param len     Size of @p buf (>= 24 recommended).
+ */
+void dect_phy_format_carrier(uint16_t carrier, char *buf, size_t len);
 
 /** @brief A supported RF band as reported by the modem (via band_get). */
 struct dect_phy_band_info {

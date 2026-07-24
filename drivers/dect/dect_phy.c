@@ -17,6 +17,7 @@
 #include <nrf_modem_dect_phy.h>
 #include <modem/nrf_modem_lib.h>
 #include <string.h>
+#include <stdio.h>
 
 LOG_MODULE_REGISTER(dect_phy, CONFIG_AETHER_DECT_LOG_LEVEL);
 
@@ -236,6 +237,7 @@ static void on_pdc(const struct nrf_modem_dect_phy_pdc_event *evt)
 	int8_t snr_db = (int8_t)(evt->snr / 4);
 
 	stats.rx_frames++;
+	stats.rx_bytes += evt->len;
 	stats.last_rssi_dbm = rssi_dbm;
 	stats.last_snr_db = snr_db;
 
@@ -540,6 +542,7 @@ int dect_phy_tx(uint16_t receiver_id, const uint8_t *data, size_t len)
 		result = -EIO;
 	} else {
 		stats.tx_ok++;
+		stats.tx_bytes += len;
 		result = 0;
 	}
 
@@ -672,6 +675,34 @@ void dect_phy_get_info(uint16_t *device_id, uint16_t *carrier, int8_t *tx_power)
 	}
 	if (tx_power != NULL) {
 		*tx_power = cfg_tx_power;
+	}
+}
+
+void dect_phy_format_carrier(uint16_t carrier, char *buf, size_t len)
+{
+	if (buf == NULL || len == 0) {
+		return;
+	}
+
+	/* ETSI channel raster, integer kHz (no floating point in the modem app):
+	 * Fc[kHz] = 450144 + carrier * 864. e.g. carrier 538 -> 914976 kHz. */
+	uint32_t fc_khz = 450144u + (uint32_t)carrier * 864u;
+	int band = -1;
+
+	for (uint8_t i = 0; i < cached_band_count; i++) {
+		if (carrier >= cached_bands[i].min_carrier &&
+		    carrier <= cached_bands[i].max_carrier) {
+			band = cached_bands[i].band_number;
+			break;
+		}
+	}
+
+	if (band >= 0) {
+		snprintf(buf, len, "band %d, %u.%03u MHz", band,
+			 fc_khz / 1000u, fc_khz % 1000u);
+	} else {
+		snprintf(buf, len, "carrier %u, %u.%03u MHz", carrier,
+			 fc_khz / 1000u, fc_khz % 1000u);
 	}
 }
 

@@ -321,6 +321,20 @@ int aether_mesh_addr_to_eui(struct net_if *iface, const uint8_t addr[6],
                             uint8_t eui_out[6]);
 
 /**
+ * @brief Supply a persistent durable node identity (override hook).
+ *
+ * Called once during mesh init to seed ctx->node_eui. The weak default in
+ * aephyr declines (returns non-zero), so the identity falls back to the HeyMac
+ * MAC / random-per-boot. An application overrides this with a strong definition
+ * to provide a reboot-stable identity -- e.g. a CGA: out = SHA256(pubkey)[:6]
+ * with the locally-administered unicast bits set, from a persisted keypair.
+ *
+ * @param out Filled with the 6-byte durable identity on success
+ * @return 0 if a persistent identity was provided, negative to decline
+ */
+int aether_node_identity_override(uint8_t out[6]);
+
+/**
  * @brief Broadcast (flooded) this node's node_eui<->HONR binding beacon.
  *
  * Lets multi-hop peers resolve this node by its stable durable identity. Sent

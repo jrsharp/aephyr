@@ -30,6 +30,16 @@ LOG_MODULE_REGISTER(aether_honr, CONFIG_AETHER_MESH_LOG_LEVEL);
 
 extern struct aether_mesh_ctx *g_mesh_ctx;
 
+/* Weak default: no persistent platform identity available. An application that
+ * wants durable, reboot-stable Aether addresses (e.g. a CGA derived from a
+ * stored keypair) overrides this with a strong definition that fills out[6] and
+ * returns 0. Kept here so aephyr links standalone; the app symbol wins. */
+__weak int aether_node_identity_override(uint8_t out[6])
+{
+	ARG_UNUSED(out);
+	return -ENOTSUP;
+}
+
 uint16_t aether_honr_addr16(const uint8_t addr6[6])
 {
 	return (uint16_t)((addr6[4] << 8) | addr6[5]);
@@ -454,16 +464,23 @@ void aether_honr_join_init(struct net_if *iface)
 	 * churns with the tree) and also serves as the joiner id in the tree-join
 	 * handshake (must stay unique while the HONR address is 0x0000 for
 	 * root/unjoined). */
+	/* Platform hook first: a node can supply a PERSISTENT durable identity that
+	 * survives reboots -- e.g. a CGA derived from a stored keypair (the address
+	 * is bound to a key the node owns). The weak default declines (returns <0);
+	 * the app overrides aether_node_identity_override() to fill it. Only fall
+	 * back to the HeyMac identity (random-per-boot on DECT), then random. */
+	if (aether_node_identity_override(ctx->node_eui) != 0) {
 #ifdef CONFIG_NET_L2_HEYMAC
-	if (heymac_get_identity(iface, ctx->node_eui) < 0) {
+		if (heymac_get_identity(iface, ctx->node_eui) < 0) {
+			(void)sys_rand_get(ctx->node_eui, 6);
+			ctx->node_eui[0] = (uint8_t)((ctx->node_eui[0] | 0x02) & 0xFE);
+		}
+#else
+		/* Non-HeyMac transport: no link MAC to borrow; random-at-boot. */
 		(void)sys_rand_get(ctx->node_eui, 6);
 		ctx->node_eui[0] = (uint8_t)((ctx->node_eui[0] | 0x02) & 0xFE);
-	}
-#else
-	/* Non-HeyMac transport: no link MAC to borrow; random-at-boot identity. */
-	(void)sys_rand_get(ctx->node_eui, 6);
-	ctx->node_eui[0] = (uint8_t)((ctx->node_eui[0] | 0x02) & 0xFE);
 #endif
+	}
 
 	honr_iface = iface;
 	ctx->honr_child_bitmap = 0;

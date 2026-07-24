@@ -132,6 +132,10 @@ struct dect_phy_stats {
 	uint32_t rx_frames;   /**< Data frames (PDC) received. */
 	int16_t last_rssi_dbm; /**< RSSI of the most recently received frame, dBm. */
 	int8_t last_snr_db;    /**< SNR of the most recently received frame, dB. */
+	int16_t last_temp_c;   /**< Modem temperature at the last operation, deg C
+				 *   (NRF_MODEM_DECT_PHY_TEMP_NOT_MEASURED = 999 if none yet). */
+	uint16_t last_voltage_mv; /**< Modem supply voltage at the last operation, mV
+				    *   (0 = not measured). */
 };
 
 /** @brief Snapshot the PHY statistics. */

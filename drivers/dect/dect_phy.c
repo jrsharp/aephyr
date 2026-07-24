@@ -138,7 +138,9 @@ static uint16_t last_pcc_tx_id;
  * the modem event context; on a single-radio half-duplex link these do not
  * race, so plain accesses are sufficient for diagnostics.
  */
-static struct dect_phy_stats stats;
+/* last_temp_c starts at the modem's "not measured" sentinel so a pre-measurement
+ * zero is never mistaken for a real 0 deg C reading. */
+static struct dect_phy_stats stats = { .last_temp_c = NRF_MODEM_DECT_PHY_TEMP_NOT_MEASURED };
 
 static const struct nrf_modem_dect_phy_config_params config_params = {
 	/* Band group disambiguates the carrier: 0 = ~2 GHz (bands 1/2/9), 1 =
@@ -194,6 +196,16 @@ static void on_activate(const struct nrf_modem_dect_phy_activate_event *evt)
 static void on_op_complete(const struct nrf_modem_dect_phy_op_complete_event *evt)
 {
 	LOG_DBG("op_complete handle %u status %d", evt->handle, evt->err);
+
+	/* Every completed operation reports the modem's temperature and supply
+	 * voltage; keep the latest valid reading for telemetry (battery/thermal
+	 * health in the field). Sentinels mean "not measured this time". */
+	if (evt->temp != NRF_MODEM_DECT_PHY_TEMP_NOT_MEASURED) {
+		stats.last_temp_c = evt->temp;
+	}
+	if (evt->voltage != NRF_MODEM_DECT_PHY_VOLTAGE_NOT_MEASURED) {
+		stats.last_voltage_mv = evt->voltage;
+	}
 
 	if (evt->handle == DECT_PHY_RX_HANDLE) {
 		/* The continuous receive operation ended (duration elapsed or

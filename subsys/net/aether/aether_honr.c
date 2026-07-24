@@ -272,6 +272,7 @@ static void honr_election_handler(struct k_work *work)
 	}
 
 	honr_become_root(ctx);
+	ctx->reelections++;   /* self-heal event: the network re-formed a root here */
 	LOG_INF("HONR: no tree heard, self-elected root (id %08x)", honr_node_id);
 }
 
@@ -401,6 +402,7 @@ static void honr_announce_handler(struct k_work *work)
 	 */
 	if (ctx && ctx->honr_joined && !honr_is_root(ctx->honr_addr) &&
 	    (k_uptime_get() - honr_parent_last_heard) > honr_parent_timeout_ms()) {
+		ctx->orphans++;   /* lost the tree above us -- topology-churn signal */
 		LOG_WRN("HONR: parent %04x silent, orphaned - relinquishing to re-elect",
 			honr_parent(ctx->honr_addr));
 		honr_relinquish_root();

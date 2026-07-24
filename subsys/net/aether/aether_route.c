@@ -581,6 +581,7 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 		if (attempt < max_retries) {
 			uint32_t cw = (uint32_t)AETHER_ACK_BACKOFF_MS << attempt;
 
+			ctx->arq_retx++;   /* a lost frame -> we retransmit (link-quality proxy) */
 			if (cw > AETHER_ACK_BACKOFF_MAX_MS) {
 				cw = AETHER_ACK_BACKOFF_MAX_MS;
 			}
@@ -593,6 +594,7 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 		LOG_DBG("datagram ACKed by %02x:%02x seq=%u len=%zu",
 			dst[4], dst[5], seq, len);
 	} else {
+		ctx->arq_failed++;   /* gave up after all retries -- the reliability KPI */
 		LOG_WRN("datagram to %02x:%02x seq=%u: no ACK/failed (%d) after %d tries",
 			dst[4], dst[5], seq, ret, max_retries + 1);
 	}

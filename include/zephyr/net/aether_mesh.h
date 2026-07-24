@@ -204,6 +204,11 @@ struct aether_mesh_ctx {
 	uint32_t route_replies;
 	uint32_t packets_forwarded;
 	uint32_t packets_dropped;
+	/* Self-organization + reliable-transport health (surfaced to fleet telemetry). */
+	uint32_t reelections;   /* times this node (re)elected itself root -- self-heal rate */
+	uint32_t orphans;       /* times this node lost its parent/tree */
+	uint32_t arq_retx;      /* stop-and-wait ARQ retransmits (lost-frame recovery) */
+	uint32_t arq_failed;    /* reliable datagrams that gave up after all retries */
 };
 
 /* Æther mesh API functions */

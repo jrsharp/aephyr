@@ -161,6 +161,16 @@ static void aether_dect_rx_thread(void *p1, void *p2, void *p3)
 		}
 
 		heymac_recv(ctx->iface, item.pkt);
+
+		/* Fairness: offer the CPU after each frame instead of draining the
+		 * whole rx_msgq back-to-back. Under mesh-relay load this thread would
+		 * otherwise monopolize (it sits at the same priority as the 9P/uart
+		 * server, which answers the companion relay); a burst of queued frames
+		 * would then starve that server and the inter-chip reads would time out
+		 * -- the relay<->9151 "uart wedge". A yield lets the equal-priority 9P
+		 * proc interleave (timeslicing is a coarser safety net). No-op if
+		 * nothing of equal/higher priority is ready, so the fast path is free. */
+		k_yield();
 	}
 
 	LOG_DBG("Æther DECT RX thread stopped");

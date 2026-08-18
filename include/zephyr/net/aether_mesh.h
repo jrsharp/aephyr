@@ -512,6 +512,17 @@ int aether_mesh_send_reliable(struct net_if *iface, const uint8_t dst[6],
 void aether_mesh_send_ack(struct net_if *iface, const uint8_t to[6], uint8_t seq);
 
 /**
+ * @brief Install a flow-control gate for incoming unicast DATA-for-us.
+ *
+ * If set, the RX path calls @p gate(payload, len) for each unicast DATA frame
+ * addressed to us BEFORE dedup/ACK. Returning false drops the frame silently (no
+ * dedup record, no ACK), so the sender's stop-and-wait ARQ retransmits it and we
+ * accept it once the gate returns true -- lossless backpressure for a higher layer
+ * (e.g. the mesh 9P server) whose intake ring is momentarily full. NULL disables.
+ */
+void aether_mesh_set_ack_gate(bool (*gate)(const uint8_t *payload, size_t len));
+
+/**
  * @brief Note an incoming ACK from `from` for `seq`; wakes a waiting
  *        aether_mesh_send_reliable() if it matches. Called from the RX path.
  */

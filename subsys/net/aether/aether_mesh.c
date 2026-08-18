@@ -852,6 +852,17 @@ static void mesh_forward_unicast(struct net_if *iface, struct net_pkt *pkt,
 #endif
 }
 
+/* Optional flow-control gate: a higher layer (the mesh 9P server) can refuse a
+ * unicast DATA-for-us when its intake ring is momentarily full. Returns true to
+ * accept (ACK + deliver), false to drop it BEFORE dedup/ACK so the sender's ARQ
+ * retransmits and we accept it once there is room -- lossless backpressure. */
+static bool (*g_ack_gate)(const uint8_t *payload, size_t len);
+
+void aether_mesh_set_ack_gate(bool (*gate)(const uint8_t *payload, size_t len))
+{
+	g_ack_gate = gate;
+}
+
 /* Packet reception */
 void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 {
@@ -950,6 +961,22 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 			hdr.mesh_net_id, ctx->mesh_net_id);
 		net_pkt_unref(pkt);
 		return;
+	}
+
+	/* Flow-control gate (before dedup + ACK): if a higher layer refuses this
+	 * unicast DATA-for-us (its ring is full), drop it now WITHOUT recording the
+	 * seq or ACKing -- the sender retransmits (same seq, still fresh to us) and we
+	 * take it once there is room. Lossless backpressure vs a silent overflow drop. */
+	if (g_ack_gate && hdr.type == AETHER_MSG_DATA &&
+	    memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
+		const uint8_t *pl = buf + hdr_len;
+		size_t pll = (hdr.length && (size_t)hdr.length <= len - hdr_len)
+			     ? hdr.length : (len - hdr_len);
+
+		if (!g_ack_gate(pl, pll)) {
+			net_pkt_unref(pkt);
+			return;
+		}
 	}
 
 	/* Duplicate detection (skip hello beacons; ACKs are idempotent and exempt so

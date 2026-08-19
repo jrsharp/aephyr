@@ -963,6 +963,12 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		return;
 	}
 
+	/* Parent liveness: any valid frame heard directly from our HONR parent keeps
+	 * the tree above us alive -- the parent's unicast/ACK/HELLO traffic proves it
+	 * is up just as well as its best-effort broadcast TREE_ANNOUNCE, which is easily
+	 * lost under load/half-duplex/high-density and was orphaning healthy children. */
+	aether_honr_note_rx(resender);
+
 	/* Flow-control gate (before dedup + ACK): if a higher layer refuses this
 	 * unicast DATA-for-us (its ring is full), drop it now WITHOUT recording the
 	 * seq or ACKing -- the sender retransmits (same seq, still fresh to us) and we

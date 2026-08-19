@@ -202,6 +202,28 @@ static int64_t honr_parent_timeout_ms(void)
 	       HONR_PARENT_MISS_MAX;
 }
 
+/* Refresh the parent-liveness clock on ANY frame heard DIRECTLY from our HONR
+ * parent -- not just its periodic broadcast TREE_ANNOUNCE. The announce is a
+ * best-effort, unACKed, single-hop broadcast; under traffic load, half-duplex TX,
+ * or high-density broadcast collisions a child can miss several in a row and orphan
+ * even while it is exchanging reliable, ACKed unicast with a demonstrably-alive
+ * parent (its data/ACKs/HELLOs prove liveness exactly as well as its announce).
+ * `resender` is the immediate link-layer sender (HeyMac last_rx_src), so this fires
+ * on the node that physically transmitted to us -- the true "I just heard my parent"
+ * signal. Called from aether_mesh_recv for every accepted frame. Relaying a frame
+ * ORIGINATED elsewhere still counts: the parent had to transmit it to reach us. */
+void aether_honr_note_rx(const uint8_t resender[6])
+{
+	struct aether_mesh_ctx *ctx = g_mesh_ctx;
+
+	if (!ctx || !ctx->honr_joined || honr_is_root(ctx->honr_addr)) {
+		return;
+	}
+	if (aether_honr_addr16(resender) == honr_parent(ctx->honr_addr)) {
+		honr_parent_last_heard = k_uptime_get();
+	}
+}
+
 /* Set this node's HONR routing address everywhere it must appear coherently:
  * the 16-bit honr_addr, its mirror in local_addr[4..5], AND the HeyMac link
  * short-address. The link addr sync is essential, not cosmetic: every frame's

@@ -567,6 +567,17 @@ void aether_honr_handle_ctrl(struct net_if *iface, uint8_t type, const uint8_t s
 			     const uint8_t *payload, uint16_t len);
 
 /**
+ * @brief Refresh parent-liveness on any frame heard directly from our HONR parent.
+ *
+ * @param resender Immediate link-layer sender (HeyMac last_rx_src) of a received
+ *                 frame. If it is this node's HONR parent, the parent-silence timer
+ *                 is reset -- so a child does not orphan while actively hearing its
+ *                 parent's unicast/ACK/HELLO traffic, not only its lossy broadcast
+ *                 TREE_ANNOUNCE. No-op for the root or an unjoined node.
+ */
+void aether_honr_note_rx(const uint8_t resender[6]);
+
+/**
  * @brief Pause TX thread to keep radio in RX mode
  *
  * Called by 9P transport before waiting for a response. Prevents

@@ -369,7 +369,16 @@ int aether_mesh_send_hello(struct net_if *iface)
 	memset(hdr.dst, 0xFF, 6);  /* Broadcast */
 	hdr.seq_no = ctx->seq_no++;
 	hdr.qos_security = (AETHER_PRIORITY_LOW << 6) | (AETHER_DELIV_BESTEFFORT << 5);
-	hdr.length = 0;  /* No payload */
+	/* Carry our durable EUI as the HELLO payload so a direct neighbor learns our
+	 * eui<->HONR binding on FIRST contact (~seconds), instead of waiting for a
+	 * later best-effort, 30s-cadence TREE_ANNOUNCE / flooded BINDING beacon that
+	 * is easily lost. This closes the window where target-by-eui (OTA, unicast
+	 * datagrams) fails "unreachable" right after a cold boot / mesh reform. Skip
+	 * if our CGA identity isn't up yet (a zero EUI is meaningless). */
+	const uint8_t zero_eui6[6] = {0};
+	bool have_eui = memcmp(ctx->node_eui, zero_eui6, 6) != 0;
+
+	hdr.length = have_eui ? 6 : 0;
 
 	/* Optimize network ID */
 #ifdef CONFIG_NET_L2_HEYMAC
@@ -389,8 +398,9 @@ int aether_mesh_send_hello(struct net_if *iface)
 		return hdr_len;
 	}
 
-	/* Allocate packet */
-	pkt = net_pkt_alloc_with_buffer(iface, hdr_len, AF_UNSPEC, 0, K_NO_WAIT);
+	/* Allocate packet (header + optional 6-byte EUI payload) */
+	pkt = net_pkt_alloc_with_buffer(iface, hdr_len + (have_eui ? 6 : 0),
+					AF_UNSPEC, 0, K_NO_WAIT);
 	if (!pkt) {
 		LOG_ERR("Failed to allocate hello packet");
 		return -ENOMEM;
@@ -402,6 +412,17 @@ int aether_mesh_send_hello(struct net_if *iface)
 		LOG_ERR("Failed to write hello header: %d", ret);
 		net_pkt_unref(pkt);
 		return ret;
+	}
+
+	/* Append our durable EUI (learned by direct neighbors on RX; see the HELLO
+	 * case in aether_mesh_recv). */
+	if (have_eui) {
+		ret = net_pkt_write(pkt, ctx->node_eui, 6);
+		if (ret < 0) {
+			LOG_ERR("Failed to write hello eui: %d", ret);
+			net_pkt_unref(pkt);
+			return ret;
+		}
 	}
 
 	/* Send via HeyMac layer */
@@ -628,10 +649,32 @@ void aether_mesh_set_neighbor_identity(struct net_if *iface, const uint8_t addr[
 
 	k_mutex_lock(&ctx->neighbor_lock, K_FOREVER);
 	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
-		if (ctx->neighbors[i].active &&
-		    memcmp(ctx->neighbors[i].addr, addr, 6) == 0) {
+		if (!ctx->neighbors[i].active) {
+			continue;
+		}
+		if (memcmp(ctx->neighbors[i].addr, addr, 6) == 0) {
 			memcpy(ctx->neighbors[i].node_eui, node_eui, 6);
-			break;
+			continue;
+		}
+		/*
+		 * An EUI is a DURABLE, UNIQUE identity: it can be at exactly one HONR
+		 * address at a time. A node's address is mutable (join, re-join,
+		 * re-parent, and notably the provisional self-elected root 0000 a node
+		 * holds for a few seconds BEFORE it joins a tree), so the same EUI can
+		 * get stamped onto a slot whose address the node no longer has. That
+		 * stale slot then shadows the live one in aether_mesh_eui_to_addr (which
+		 * scans the table), and eui-addressed traffic is sent to a dead address
+		 * -- if the stale address happens to be 0000 on a node that IS the root,
+		 * it addresses ITSELF: no ACK, and every eui-targeted operation
+		 * (OTA push_open, unicast datagram) fails at its first message.
+		 * So when we learn eui@addr, drop that eui from every OTHER slot.
+		 */
+		if (memcmp(ctx->neighbors[i].node_eui, node_eui, 6) == 0) {
+			LOG_DBG("neighbor %02x:%02x: clearing stale identity "
+				"(moved to %02x:%02x)",
+				ctx->neighbors[i].addr[4], ctx->neighbors[i].addr[5],
+				addr[4], addr[5]);
+			memset(ctx->neighbors[i].node_eui, 0, 6);
 		}
 	}
 	k_mutex_unlock(&ctx->neighbor_lock);
@@ -723,13 +766,26 @@ int aether_mesh_eui_to_addr(struct net_if *iface, const uint8_t node_eui[6],
 	 * NOT hear directly (multi-hop). Order matters: a stale flooded binding must
 	 * never shadow a fresh neighbor entry, or a peer that just re-parented would
 	 * resolve to its OLD HONR address and the datagram would misroute. */
+	/* Pick the FRESHEST matching entry, not the first one scanned: a node that
+	 * just re-addressed (join / re-parent) can briefly leave a stale slot behind
+	 * carrying the same EUI, and answering with the stale address misroutes every
+	 * eui-addressed message. set_neighbor_identity actively clears duplicates, so
+	 * this is belt-and-braces for an EUI learned by another path. */
+	int best = -1;
+
 	for (int i = 0; i < CONFIG_AETHER_MAX_NEIGHBORS; i++) {
-		if (ctx->neighbors[i].active &&
-		    memcmp(ctx->neighbors[i].node_eui, node_eui, 6) == 0) {
-			memcpy(addr_out, ctx->neighbors[i].addr, 6);
-			ret = 0;
-			break;
+		if (!ctx->neighbors[i].active ||
+		    memcmp(ctx->neighbors[i].node_eui, node_eui, 6) != 0) {
+			continue;
 		}
+		if (best < 0 ||
+		    (int32_t)(ctx->neighbors[i].last_seen - ctx->neighbors[best].last_seen) > 0) {
+			best = i;
+		}
+	}
+	if (best >= 0) {
+		memcpy(addr_out, ctx->neighbors[best].addr, 6);
+		ret = 0;
 	}
 	if (ret != 0) {
 		ret = binding_lookup(ctx, 0, node_eui, addr_out);
@@ -1017,9 +1073,17 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 	switch (hdr.type) {
 	case AETHER_MSG_HELLO:
 		LOG_DBG("Received hello from %02x:%02x:%02x:%02x:%02x:%02x",
-			hdr.src[0], hdr.src[1], hdr.src[2], 
+			hdr.src[0], hdr.src[1], hdr.src[2],
 			hdr.src[3], hdr.src[4], hdr.src[5]);
 		ctx->hello_received++;
+		/* Learn the sender's durable EUI from the HELLO payload so eui->addr
+		 * resolves for this direct neighbor immediately (the neighbor's node_eui
+		 * is otherwise blank until a later, lossy TREE_ANNOUNCE/BINDING beacon).
+		 * update_neighbor above already created/refreshed the entry keyed by
+		 * hdr.src, so this just stamps its identity. */
+		if (hdr.length >= 6 && (len - hdr_len) >= 6) {
+			aether_mesh_set_neighbor_identity(iface, hdr.src, buf + hdr_len);
+		}
 		/* Add direct route to hello sender */
 		aether_mesh_add_route(iface, hdr.src, hdr.src, 1);
 		net_pkt_unref(pkt);

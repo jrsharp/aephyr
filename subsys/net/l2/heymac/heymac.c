@@ -361,7 +361,8 @@ void heymac_recv(struct net_if *iface, struct net_pkt *pkt)
 
 	ctx->rx_packets++;
 
-	LOG_INF("HeyMac RX: type=%d, len=%zu",
+	/* DBG, not INF: per-FRAME (see the note in aether_dect.c's RX log). */
+	LOG_DBG("HeyMac RX: type=%d, len=%zu",
 		hdr.version_type & 0x0F, len - hdr_len);
 
 	/* Remember the immediate sender (resender) for stateless HONR routing. */

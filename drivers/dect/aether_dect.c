@@ -405,7 +405,11 @@ static void aether_dect_rx_callback(const uint8_t *data, size_t len, int16_t rss
 	}
 
 	heymac_ctx->rx_packets++;
-	LOG_INF("DECT RX: len=%zu, rssi=%d, snr=%d", len, rssi_dbm, snr_db);
+	/* DBG, not INF: this is per-FRAME. At INF a sustained transfer emits
+	 * thousands of lines/sec into the console UART, and if the host is not
+	 * draining that endpoint the back-pressure starves the radio path itself
+	 * (measured: 9-26x slower mesh OTA). Counters live in `dect stats`. */
+	LOG_DBG("DECT RX: len=%zu, rssi=%d, snr=%d", len, rssi_dbm, snr_db);
 }
 
 /* HeyMac radio API implementation. */

@@ -1051,7 +1051,9 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		    memcmp(hdr.dst, ctx->local_addr, 6) == 0) {
 			aether_mesh_send_ack(iface, hdr.src, hdr.seq_no);
 		}
-		LOG_INF("Dropping duplicate from %02x:%02x:%02x:%02x:%02x:%02x seq=%d",
+		/* DBG, not INF: fires per retransmitted frame, so it is heaviest
+		 * exactly when the link is already struggling. */
+		LOG_DBG("Dropping duplicate from %02x:%02x:%02x:%02x:%02x:%02x seq=%d",
 			hdr.src[0], hdr.src[1], hdr.src[2],
 			hdr.src[3], hdr.src[4], hdr.src[5], hdr.seq_no);
 		net_pkt_unref(pkt);
@@ -1130,7 +1132,11 @@ void aether_mesh_recv(struct net_if *iface, struct net_pkt *pkt)
 		break;
 
 	case AETHER_MSG_DATA:
-		LOG_INF("mesh DATA from %02x:%02x:%02x:%02x:%02x:%02x "
+		/* DBG, not INF: per-DATA-frame, and the widest line in the hot path
+		 * (three MAC addresses, ~90 chars). At INF a 300 KB OTA push spends
+		 * more UART time describing frames than the radio spends sending them.
+		 * Keep it available for diagnosis, just not on by default. */
+		LOG_DBG("mesh DATA from %02x:%02x:%02x:%02x:%02x:%02x "
 			"to %02x:%02x:%02x:%02x:%02x:%02x "
 			"(local=%02x:%02x:%02x:%02x:%02x:%02x)",
 			hdr.src[0], hdr.src[1], hdr.src[2],

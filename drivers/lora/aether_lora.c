@@ -56,11 +56,15 @@ struct aether_lora_ctx {
 	bool     cad_enabled;
 };
 
+/* Upper bound on one CAD round trip; the radio answers in a few symbols. */
+#define AETHER_LORA_CAD_TIMEOUT_MS 500
+
 /* Forward declarations */
 static void aether_lora_rx_thread(void *p1, void *p2, void *p3);
 static void aether_lora_tx_thread(void *p1, void *p2, void *p3);
 static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
-				    uint16_t size, int16_t rssi, int8_t snr);
+				    uint16_t size, int16_t rssi, int8_t snr,
+				    void *user_data);
 
 /* Static context instance - forward declared for RX callback */
 static struct aether_lora_ctx aether_lora_ctx_0;
@@ -110,15 +114,13 @@ static void aether_lora_rx_thread(void *p1, void *p2, void *p3)
  */
 static int aether_lora_cad_check(struct aether_lora_ctx *ctx)
 {
-	bool activity;
-
 	for (int i = 0; i < CONFIG_AETHER_LORA_CAD_MAX_RETRIES; i++) {
-		int ret = lora_cad(ctx->lora_dev, &activity);
+		int ret = lora_cad(ctx->lora_dev, K_MSEC(AETHER_LORA_CAD_TIMEOUT_MS));
 		if (ret < 0) {
 			LOG_WRN("CAD failed (%d), proceeding with TX", ret);
 			return 0;
 		}
-		if (!activity) {
+		if (ret == 0) {
 			LOG_INF("CAD: channel clear (attempt %d)", i + 1);
 			return 0;
 		}
@@ -183,7 +185,7 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 		 * Stop async RX, wait for radio to be ready, send, then restart RX.
 		 * Need substantial delay - radio may be mid-packet when we stop RX,
 		 * and stale DIO1 work handlers may still need to drain. */
-		ret = lora_recv_async(ctx->lora_dev, NULL);
+		ret = lora_recv_async(ctx->lora_dev, NULL, NULL);
 		if (ret == -EINVAL) {
 			/* Modem wasn't in RX (error handler released it).
 			 * Wait for any pending DIO1 work to drain. */
@@ -245,7 +247,7 @@ static void aether_lora_tx_thread(void *p1, void *p2, void *p3)
 
 		/* Delay before restarting RX - ensure radio is fully idle */
 		k_msleep(50);
-		lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+		lora_recv_async(ctx->lora_dev, aether_lora_rx_callback, NULL);
 
 		net_pkt_unref(pkt);
 	}
@@ -272,7 +274,7 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 		}
 
 		/* Stop RX, wait for radio to settle */
-		ret = lora_recv_async(ctx->lora_dev, NULL);
+		ret = lora_recv_async(ctx->lora_dev, NULL, NULL);
 		if (ret == -EINVAL) {
 			k_msleep(300);
 		} else {
@@ -290,7 +292,7 @@ int aether_lora_send_sync(const uint8_t *data, size_t len, int max_retries)
 
 		/* Restart RX */
 		k_msleep(50);
-		lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+		lora_recv_async(ctx->lora_dev, aether_lora_rx_callback, NULL);
 
 		if (ret == 0) {
 			ctx->tx_count++;
@@ -378,10 +380,10 @@ int aether_lora_set_phy(const struct aether_lora_phy *in)
 	 * then re-arm RX.  Mirrors the TX thread's RX-stop/restart dance so a
 	 * concurrent send doesn't reconfigure mid-air.  Best done while idle. */
 	aether_lora_tx_pause();
-	lora_recv_async(ctx->lora_dev, NULL);
+	lora_recv_async(ctx->lora_dev, NULL, NULL);
 	k_msleep(50);
 	ret = lora_config(ctx->lora_dev, &ctx->modem_config);
-	lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+	lora_recv_async(ctx->lora_dev, aether_lora_rx_callback, NULL);
 	aether_lora_tx_resume();
 
 	if (ret < 0) {
@@ -408,14 +410,14 @@ int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err)
 	/* Pause TX thread and stop RX so we own the modem */
 	atomic_set(&tx_paused, 1);
 	k_msleep(100);  /* Let TX thread finish if mid-send */
-	lora_recv_async(ctx->lora_dev, NULL);
+	lora_recv_async(ctx->lora_dev, NULL, NULL);
 	k_msleep(200);
 
 	for (int i = 0; i < count; i++) {
-		ret = lora_cad(ctx->lora_dev, &activity);
+		ret = lora_cad(ctx->lora_dev, K_MSEC(AETHER_LORA_CAD_TIMEOUT_MS));
 		if (ret < 0) {
 			errors++;
-		} else if (activity) {
+		} else if (ret == 1) {
 			busy++;
 		} else {
 			clear++;
@@ -425,7 +427,7 @@ int aether_lora_cad_test(int count, int *out_clear, int *out_busy, int *out_err)
 
 	/* Restart RX, resume TX */
 	k_msleep(50);
-	lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+	lora_recv_async(ctx->lora_dev, aether_lora_rx_callback, NULL);
 	atomic_clear(&tx_paused);
 
 	if (out_clear) *out_clear = clear;
@@ -449,8 +451,11 @@ void aether_lora_tx_resume(void)
 
 /* LoRa RX callback - note: dev is the LoRa radio, not our net device */
 static void aether_lora_rx_callback(const struct device *dev, uint8_t *data,
-				    uint16_t size, int16_t rssi, int8_t snr)
+				    uint16_t size, int16_t rssi, int8_t snr,
+				    void *user_data)
 {
+	ARG_UNUSED(user_data);
+
 	/* Use static context - dev->data is the LoRa driver's context, not ours */
 	struct aether_lora_ctx *ctx = &aether_lora_ctx_0;
 	struct heymac_context *heymac_ctx;
@@ -556,7 +561,7 @@ static int aether_lora_start(const struct device *dev)
 	}
 
 	/* Start RX mode */
-	ret = lora_recv_async(ctx->lora_dev, aether_lora_rx_callback);
+	ret = lora_recv_async(ctx->lora_dev, aether_lora_rx_callback, NULL);
 	if (ret < 0) {
 		LOG_ERR("Failed to start LoRa RX: %d", ret);
 		return ret;
@@ -592,7 +597,7 @@ static int aether_lora_stop(const struct device *dev)
 	ctx->running = false;
 
 	/* Stop LoRa */
-	lora_recv_async(ctx->lora_dev, NULL);  /* Disable RX callback */
+	lora_recv_async(ctx->lora_dev, NULL, NULL);  /* Disable RX callback */
 
 	/* Wait for threads to stop */
 	k_thread_join(&ctx->rx_thread, K_SECONDS(1));

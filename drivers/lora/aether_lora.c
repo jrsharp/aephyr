@@ -328,6 +328,41 @@ void aether_lora_get_stats(struct aether_lora_stats *out)
 	out->last_snr = ctx->last_snr;
 }
 
+/*
+ * Bandwidth is carried as a small ordinal (0=125, 1=250, 2=500 kHz) both in
+ * Kconfig (CONFIG_AETHER_LORA_BW) and on the wire / in /net/aether/phy, where
+ * struct aether_lora_phy.bw is a single byte (see AETHER_PROTOCOL_SPEC.md).
+ * Zephyr's enum lora_signal_bandwidth used to match that ordinal 1:1, but as
+ * of Zephyr 4.4 its values are the literal kHz (BW_125_KHZ == 125), which no
+ * longer fits a byte and no longer matches the protocol.  Keep the ordinal as
+ * the external encoding and convert only at the driver boundary.
+ */
+#define AETHER_BW_ORDINAL_MAX 2
+
+static enum lora_signal_bandwidth bw_from_ordinal(uint8_t ordinal)
+{
+	switch (ordinal) {
+	case 1:
+		return BW_250_KHZ;
+	case 2:
+		return BW_500_KHZ;
+	default:
+		return BW_125_KHZ;
+	}
+}
+
+static uint8_t bw_to_ordinal(enum lora_signal_bandwidth bw)
+{
+	switch (bw) {
+	case BW_250_KHZ:
+		return 1;
+	case BW_500_KHZ:
+		return 2;
+	default:
+		return 0;
+	}
+}
+
 void aether_lora_get_phy(struct aether_lora_phy *out)
 {
 	struct aether_lora_ctx *ctx = &aether_lora_ctx_0;
@@ -336,7 +371,7 @@ void aether_lora_get_phy(struct aether_lora_phy *out)
 		return;
 	}
 	out->sf = (uint8_t)ctx->modem_config.datarate;
-	out->bw = (uint8_t)ctx->modem_config.bandwidth;
+	out->bw = bw_to_ordinal(ctx->modem_config.bandwidth);
 	out->cr = (uint8_t)ctx->modem_config.coding_rate;
 	out->tx_power = (int8_t)ctx->modem_config.tx_power;
 	out->cad = ctx->cad_enabled;
@@ -351,23 +386,25 @@ int aether_lora_set_phy(const struct aether_lora_phy *in)
 	if (!in) {
 		return -EINVAL;
 	}
-	/* Validate against the lora_datarate / lora_signal_bandwidth /
-	 * lora_coding_rate enum ranges (SF7-12, BW 125/250/500, CR 4/5-4/8). */
+	/* Validate SF and CR against the lora_datarate / lora_coding_rate enum
+	 * ranges (SF7-12, CR 4/5-4/8); bw is the 0..2 ordinal, not the enum. */
 	if (in->sf < SF_7 || in->sf > SF_12 ||
-	    in->bw > BW_500_KHZ ||
+	    in->bw > AETHER_BW_ORDINAL_MAX ||
 	    in->cr < CR_4_5 || in->cr > CR_4_8) {
 		return -EINVAL;
 	}
 
+	enum lora_signal_bandwidth bw = bw_from_ordinal(in->bw);
+
 	modem_changed = (ctx->modem_config.datarate != in->sf) ||
-			(ctx->modem_config.bandwidth != in->bw) ||
+			(ctx->modem_config.bandwidth != bw) ||
 			(ctx->modem_config.coding_rate != in->cr) ||
 			(ctx->modem_config.tx_power != in->tx_power);
 
 	/* CAD is just a pre-TX software gate — no radio reconfig needed. */
 	ctx->cad_enabled = in->cad;
 	ctx->modem_config.datarate = in->sf;
-	ctx->modem_config.bandwidth = in->bw;
+	ctx->modem_config.bandwidth = bw;
 	ctx->modem_config.coding_rate = in->cr;
 	ctx->modem_config.tx_power = in->tx_power;
 
@@ -707,10 +744,10 @@ static int aether_lora_init(const struct device *dev)
 	/* Modem configuration — spreading factor / bandwidth / coding rate come
 	 * from Kconfig (CONFIG_AETHER_LORA_SF/BW/CR) so the air-rate is tunable
 	 * per build: long-range defaults (SF10/BW125) vs short-range high-rate
-	 * for in-lab (SF7/BW500).  The CONFIG ints map 1:1 onto the lora_datarate
-	 * / lora_signal_bandwidth / lora_coding_rate enums. */
+	 * for in-lab (SF7/BW500).  SF and CR map 1:1 onto the lora_datarate /
+	 * lora_coding_rate enums; BW is an ordinal (see bw_from_ordinal). */
 	ctx->modem_config.frequency = 915000000;  /* 915 MHz */
-	ctx->modem_config.bandwidth = CONFIG_AETHER_LORA_BW;
+	ctx->modem_config.bandwidth = bw_from_ordinal(CONFIG_AETHER_LORA_BW);
 	ctx->modem_config.datarate = CONFIG_AETHER_LORA_SF;
 	ctx->modem_config.preamble_len = 16;  /* 16 symbols for half-duplex turnaround margin */
 	ctx->modem_config.coding_rate = CONFIG_AETHER_LORA_CR;

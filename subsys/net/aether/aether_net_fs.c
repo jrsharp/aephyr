@@ -143,7 +143,6 @@ struct aconn {
 	struct arx_msg rx[AETHER_NET_RX_RING];
 	uint8_t        rx_head;   /* oldest */
 	uint8_t        rx_count;
-	struct k_sem   rx_sem;    /* counts buffered messages */
 
 	/* Fragment reassembly (keyed on source; one in-progress message). */
 	uint8_t  ra_buf[AETHER_NET_MAX_MSG];
@@ -160,6 +159,11 @@ struct aconn {
 
 /* Large (RX rings + reassembly) — keep in PSRAM on the deck. */
 static struct aconn aconns[AETHER_NET_MAX_CONNS] __psram;
+
+/* Each conversation's count of buffered messages, in internal RAM beside
+ * it: kernel objects never live in PSRAM */
+static struct k_sem aconn_rx_sem[AETHER_NET_MAX_CONNS];
+#define RX_SEM(c) (&aconn_rx_sem[(c) - aconns])
 static struct k_mutex aconns_lock;
 
 /* ---- small read/dir helpers (mirrors dev_net.c) ---- */
@@ -364,7 +368,7 @@ static int alloc_aconn(void)
 			aconns[i].ra_len = 0;
 			aconns[i].krecv = NULL;
 			aconns[i].krecv_user = NULL;
-			k_sem_init(&aconns[i].rx_sem, 0, AETHER_NET_RX_RING);
+			k_sem_init(&aconn_rx_sem[i], 0, AETHER_NET_RX_RING);
 			k_mutex_unlock(&aconns_lock);
 			return i;
 		}
@@ -423,7 +427,7 @@ static void free_aconn(int s)
 		aether_net_readvertise();
 	}
 	/* wake any reader blocked on data so it returns EOF */
-	k_sem_give(&aconns[s].rx_sem);
+	k_sem_give(&aconn_rx_sem[s]);
 }
 
 int aether_net_set_krecv(int slot, aether_net_krecv_t cb, void *user)
@@ -523,7 +527,7 @@ static void anet_rx(const uint8_t src[6], const uint8_t *data, uint16_t len,
 				memcpy(c->rx[slot].src, src, 6);
 				memcpy(c->rx[slot].data, c->ra_buf, c->ra_len);
 				c->rx_count++;
-				k_sem_give(&c->rx_sem);
+				k_sem_give(RX_SEM(c));
 			}
 			c->ra_active = false;
 			c->ra_len = 0;
@@ -554,7 +558,7 @@ void aether_net_deliver_bcast(const uint8_t src[6], const uint8_t *data,
 		memcpy(c->rx[slot].src, src, 6);
 		memcpy(c->rx[slot].data, data, len);
 		c->rx_count++;
-		k_sem_give(&c->rx_sem);
+		k_sem_give(RX_SEM(c));
 	}
 	k_mutex_unlock(&aconns_lock);
 }
@@ -1059,7 +1063,7 @@ static int anet_read(struct srv *srv, struct srv_fid *fid, uint64_t off,
 			return -EINVAL;
 		}
 		struct aconn *c = &aconns[d->slot];
-		k_sem_take(&c->rx_sem, K_FOREVER);
+		k_sem_take(RX_SEM(c), K_FOREVER);
 		k_mutex_lock(&aconns_lock, K_FOREVER);
 		if (c->rx_count == 0) { /* woken by hangup */
 			k_mutex_unlock(&aconns_lock);
